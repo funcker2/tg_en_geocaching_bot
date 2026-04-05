@@ -22,11 +22,23 @@ def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
 
 
+# ── /myid — anyone can check their Telegram ID ───────────────────────────────
+
+@admin_router.message(Command("myid"))
+async def cmd_myid(message: Message) -> None:
+    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+
+
 # ── /admin entry point ────────────────────────────────────────────────────────
 
 @admin_router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
+        await message.answer(
+            f"⛔️ Нет доступа.\n"
+            f"Ваш ID: <code>{message.from_user.id}</code>\n\n"
+            f"Попросите владельца добавить ваш ID в ADMIN_IDS."
+        )
         return
     await state.clear()
     await message.answer("🔑 Панель администратора", reply_markup=admin_main_menu())
