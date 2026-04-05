@@ -14,6 +14,7 @@ from keyboards import (
     admin_point_actions,
     admin_points_menu,
     admin_settings_menu,
+    language_select_keyboard,
     location_keyboard,
 )
 from states import AdminPoint, AdminSettings
@@ -79,11 +80,12 @@ async def cb_play_as_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         return
     await state.clear()
+    # Reset language so the selection screen appears fresh
+    await db.reset_user_lang(callback.from_user.id)
     await callback.message.edit_text("🎮 Режим игрока активирован!")
     await callback.message.answer(
-        "Поделитесь своей геолокацией, чтобы увидеть расстояния до точек.\n\n"
-        "Вернуться в админку: /admin",
-        reply_markup=location_keyboard(),
+        "🌐 Выберите язык / Изберете език:",
+        reply_markup=language_select_keyboard(),
     )
     await callback.answer()
 

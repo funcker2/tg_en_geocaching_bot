@@ -110,6 +110,8 @@ def location_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
 def refresh_keyboard(label: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text=label or t(lang, "btn_refresh"), callback_data="user:refresh")
+    b.button(text=t(lang, "btn_change_lang"),      callback_data="user:change_lang")
+    b.adjust(1)
     return b.as_markup()
 
 

@@ -141,6 +141,15 @@ async def set_user_lang(user_id: int, lang: str) -> None:
         await db.commit()
 
 
+async def reset_user_lang(user_id: int) -> None:
+    """Clear stored language so user sees the language selection screen again."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET lang = NULL WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+
+
 async def reset_user_progress(user_id: int) -> None:
     """Wipe cooldown + all activated points so the player starts fresh."""
     async with aiosqlite.connect(DB_PATH) as db:

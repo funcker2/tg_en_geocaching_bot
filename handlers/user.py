@@ -107,6 +107,15 @@ async def cmd_lang(message: Message) -> None:
     )
 
 
+@user_router.callback_query(F.data == "user:change_lang")
+async def cb_change_lang(callback: CallbackQuery) -> None:
+    await callback.message.answer(
+        "🌐 Выберите язык / Изберете език:",
+        reply_markup=language_select_keyboard(),
+    )
+    await callback.answer()
+
+
 @user_router.callback_query(F.data.startswith("user:lang:"))
 async def cb_set_lang(callback: CallbackQuery) -> None:
     lang = callback.data.split(":")[2]
