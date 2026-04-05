@@ -1,3 +1,5 @@
+import re
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -27,6 +29,20 @@ def is_admin(user_id: int) -> bool:
 @admin_router.message(Command("myid"))
 async def cmd_myid(message: Message) -> None:
     await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>")
+
+
+# ── /cancel — admin can always reset stuck FSM state ─────────────────────────
+
+@admin_router.message(Command("cancel"))
+async def cmd_cancel(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    current = await state.get_state()
+    await state.clear()
+    if current:
+        await message.answer("❌ Действие отменено. Введи /admin чтобы вернуться в меню.")
+    else:
+        await message.answer("Нечего отменять. Введи /admin для открытия меню.")
 
 
 # ── /admin entry point ────────────────────────────────────────────────────────
@@ -104,7 +120,8 @@ async def cb_admin_set_coords(callback: CallbackQuery, state: FSMContext) -> Non
     await callback.message.edit_text(
         f"📍 Введи координаты для <b>Точки {point_id}</b>:\n\n"
         "Формат: <code>55.751244 37.618423</code>\n"
-        "(широта и долгота через пробел)"
+        "Или скопируй из Google Maps: <code>55.751244, 37.618423</code>\n\n"
+        "/cancel — отменить"
     )
     await callback.answer()
 
@@ -117,13 +134,21 @@ async def msg_admin_coords(message: Message, state: FSMContext) -> None:
     point_id: int = data["point_id"]
 
     try:
-        parts = message.text.strip().replace(",", ".").split()
-        lat, lon = float(parts[0]), float(parts[1])
+        # Support formats: "55.1 37.2", "55.1, 37.2", "55,1 37,2" (comma as decimal)
+        parts = [p for p in re.split(r"[\s,;]+", message.text.strip()) if p]
+        if len(parts) < 2:
+            raise ValueError
+        # Replace comma-as-decimal-separator but only within each part
+        lat = float(parts[0].replace(",", "."))
+        lon = float(parts[1].replace(",", "."))
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
             raise ValueError
     except (ValueError, IndexError):
         await message.answer(
-            "❌ Неверный формат.\nПример: <code>55.751244 37.618423</code>"
+            "❌ Неверный формат.\n"
+            "Примеры:\n"
+            "<code>55.751244 37.618423</code>\n"
+            "<code>55.751244, 37.618423</code>"
         )
         return
 
@@ -144,7 +169,7 @@ async def cb_admin_set_photo(callback: CallbackQuery, state: FSMContext) -> None
     point_id = int(callback.data.split(":")[2])
     await state.update_data(point_id=point_id)
     await state.set_state(AdminPoint.waiting_photo)
-    await callback.message.edit_text(f"🖼 Отправь фото для <b>Точки {point_id}</b>:")
+    await callback.message.edit_text(f"🖼 Отправь фото для <b>Точки {point_id}</b>:\n\n/cancel — отменить")
     await callback.answer()
 
 
@@ -275,7 +300,7 @@ async def cb_admin_set_setting(callback: CallbackQuery, state: FSMContext) -> No
     await state.update_data(setting_key=key)
     await state.set_state(AdminSettings.waiting_value)
     label = _SETTING_LABELS.get(key, key)
-    await callback.message.edit_text(f"✏️ Введи новое значение для:\n<b>{label}</b>")
+    await callback.message.edit_text(f"✏️ Введи новое значение для:\n<b>{label}</b>\n\n/cancel — отменить")
     await callback.answer()
 
 
