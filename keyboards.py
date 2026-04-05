@@ -13,7 +13,8 @@ def admin_main_menu() -> InlineKeyboardMarkup:
     b.button(text="⚙️ Точки",      callback_data="admin:points")
     b.button(text="👥 Игроки",     callback_data="admin:players")
     b.button(text="🔧 Настройки",  callback_data="admin:settings")
-    b.adjust(3)
+    b.button(text="🎮 Играть как пользователь", callback_data="admin:play_as_user")
+    b.adjust(3, 1)
     return b.as_markup()
 
 

@@ -14,6 +14,7 @@ from keyboards import (
     admin_point_actions,
     admin_points_menu,
     admin_settings_menu,
+    location_keyboard,
 )
 from states import AdminPoint, AdminSettings
 
@@ -68,6 +69,22 @@ async def cb_admin_main(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.clear()
     await callback.message.edit_text("🔑 Панель администратора", reply_markup=admin_main_menu())
+    await callback.answer()
+
+
+# ── Play as user ──────────────────────────────────────────────────────────────
+
+@admin_router.callback_query(F.data == "admin:play_as_user")
+async def cb_play_as_user(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.edit_text("🎮 Режим игрока активирован!")
+    await callback.message.answer(
+        "Поделитесь своей геолокацией, чтобы увидеть расстояния до точек.\n\n"
+        "Вернуться в админку: /admin",
+        reply_markup=location_keyboard(),
+    )
     await callback.answer()
 
 
