@@ -184,11 +184,33 @@ async def msg_admin_photo(message: Message, state: FSMContext) -> None:
     await db.update_point_photo(point_id, file_id)
     await state.clear()
 
+    await message.answer(f"✅ Фото для Точки {point_id} сохранено!")
+
+    # Auto-advance: find next unconfigured point and start its setup
     points = await db.get_points()
-    await message.answer(
-        f"✅ Фото для Точки {point_id} сохранено!",
-        reply_markup=admin_points_menu(points),
+    next_point = next(
+        (p for p in points if p["id"] > point_id and (p["lat"] is None or not p["photo_file_id"])),
+        None,
     )
+    if next_point:
+        await state.update_data(point_id=next_point["id"])
+        await state.set_state(AdminPoint.waiting_coords)
+        missing = []
+        if next_point["lat"] is None:
+            missing.append("координаты")
+        if not next_point["photo_file_id"]:
+            missing.append("фото")
+        await message.answer(
+            f"➡️ <b>{next_point['label']}</b> ещё не настроена ({', '.join(missing)}).\n\n"
+            f"📍 Введи координаты:\n"
+            f"Пример: <code>55.751244 37.618423</code>\n\n"
+            f"/cancel — пропустить и выйти в меню"
+        )
+    else:
+        await message.answer(
+            "🎉 Все точки настроены!",
+            reply_markup=admin_points_menu(points),
+        )
 
 
 @admin_router.message(AdminPoint.waiting_photo)
@@ -327,4 +349,20 @@ async def msg_admin_setting_value(message: Message, state: FSMContext) -> None:
     await message.answer(
         "✅ Настройка сохранена!",
         reply_markup=admin_settings_menu(refresh_sec, cooldown_min),
+    )
+
+
+# ── Fallback: admin sends text when bot isn't waiting for input ───────────────
+
+@admin_router.message(F.text, ~F.text.startswith("/"))
+async def admin_text_fallback(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    current = await state.get_state()
+    if current is not None:
+        return  # let other handlers deal with active states
+    await message.answer(
+        "ℹ️ Бот сейчас ничего не ждёт.\n\n"
+        "Используй /admin чтобы открыть меню,\n"
+        "или /cancel чтобы сбросить состояние."
     )
