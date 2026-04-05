@@ -5,8 +5,10 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from i18n import t
 
-# ── Admin ─────────────────────────────────────────────────────────────────────
+
+# ── Admin (always Russian) ────────────────────────────────────────────────────
 
 def admin_main_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
@@ -49,8 +51,9 @@ def admin_players_menu(users: list[dict]) -> InlineKeyboardMarkup:
     for u in users:
         cd_icon = "⏳ " if u["cooldown_until"] else ""
         pts     = u["points_count"]
+        lang    = u.get("lang") or "—"
         b.button(
-            text=f"{cd_icon}ID {u['user_id']} | точек: {pts}",
+            text=f"{cd_icon}ID {u['user_id']} | точек: {pts} | {lang}",
             callback_data=f"admin:player:{u['user_id']}",
         )
     b.button(text="◀️ Назад", callback_data="admin:main")
@@ -83,25 +86,36 @@ def admin_settings_menu(refresh_sec: str, cooldown_min: str) -> InlineKeyboardMa
     return b.as_markup()
 
 
-# ── User ──────────────────────────────────────────────────────────────────────
+# ── User (language-aware) ─────────────────────────────────────────────────────
 
-def location_keyboard() -> ReplyKeyboardMarkup:
+def language_select_keyboard() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="🇷🇺 Русский",    callback_data="user:lang:ru")
+    b.button(text="🇧🇬 Български", callback_data="user:lang:bg")
+    b.adjust(2)
+    return b.as_markup()
+
+
+def location_keyboard(lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📍 Поделиться геолокацией", request_location=True)]],
+        keyboard=[[KeyboardButton(
+            text=t(lang, "btn_share_location"),
+            request_location=True,
+        )]],
         resize_keyboard=True,
         one_time_keyboard=False,
     )
 
 
-def refresh_keyboard(label: str = "🔄 Обновить") -> InlineKeyboardMarkup:
+def refresh_keyboard(label: str | None = None, lang: str = "ru") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text=label, callback_data="user:refresh")
+    b.button(text=label or t(lang, "btn_refresh"), callback_data="user:refresh")
     return b.as_markup()
 
 
-def activate_keyboard(point_id: int) -> InlineKeyboardMarkup:
+def activate_keyboard(point_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="✅ Да, активировать!", callback_data=f"user:activate:{point_id}")
-    b.button(text="❌ Нет",               callback_data="user:activate:no")
+    b.button(text=t(lang, "btn_activate_yes"), callback_data=f"user:activate:{point_id}")
+    b.button(text=t(lang, "btn_activate_no"),  callback_data="user:activate:no")
     b.adjust(2)
     return b.as_markup()

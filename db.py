@@ -24,6 +24,7 @@ async def init_db() -> None:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id        INTEGER PRIMARY KEY,
+                lang           TEXT,
                 cooldown_until TEXT,
                 last_lat       REAL,
                 last_lon       REAL,
@@ -48,6 +49,12 @@ async def init_db() -> None:
         """)
         await db.execute("INSERT OR IGNORE INTO settings VALUES ('refresh_delay_sec', '10')")
         await db.execute("INSERT OR IGNORE INTO settings VALUES ('activation_cooldown_min', '10')")
+
+        # Migration: add lang column to existing deployments
+        async with db.execute("PRAGMA table_info(users)") as cur:
+            cols = [row[1] for row in await cur.fetchall()]
+        if "lang" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN lang TEXT")
 
         await db.commit()
 
@@ -122,6 +129,14 @@ async def reset_user_cooldown(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET cooldown_until = NULL WHERE user_id = ?", (user_id,)
+        )
+        await db.commit()
+
+
+async def set_user_lang(user_id: int, lang: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET lang = ? WHERE user_id = ?", (lang, user_id)
         )
         await db.commit()
 
