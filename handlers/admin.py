@@ -1,0 +1,293 @@
+from aiogram import F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+import db
+from config import ADMINS
+from keyboards import (
+    admin_main_menu,
+    admin_player_actions,
+    admin_players_menu,
+    admin_point_actions,
+    admin_points_menu,
+    admin_settings_menu,
+)
+from states import AdminPoint, AdminSettings
+
+admin_router = Router()
+
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMINS
+
+
+# ── /admin entry point ────────────────────────────────────────────────────────
+
+@admin_router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer("🔑 Панель администратора", reply_markup=admin_main_menu())
+
+
+# ── Main menu callback ────────────────────────────────────────────────────────
+
+@admin_router.callback_query(F.data == "admin:main")
+async def cb_admin_main(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    await callback.message.edit_text("🔑 Панель администратора", reply_markup=admin_main_menu())
+    await callback.answer()
+
+
+# ── Points ────────────────────────────────────────────────────────────────────
+
+@admin_router.callback_query(F.data == "admin:points")
+async def cb_admin_points(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    points = await db.get_points()
+    await callback.message.edit_text("⚙️ Точки квеста:", reply_markup=admin_points_menu(points))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:point:"))
+async def cb_admin_point_detail(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    point = await db.get_point(point_id)
+    if not point:
+        await callback.answer("Точка не найдена", show_alert=True)
+        return
+
+    coords = (
+        f"<code>{point['lat']}, {point['lon']}</code>"
+        if point["lat"] is not None
+        else "не задано"
+    )
+    photo = "✅ загружено" if point["photo_file_id"] else "❌ не загружено"
+    text = (
+        f"<b>{point['label']}</b>\n\n"
+        f"📍 Координаты: {coords}\n"
+        f"🖼 Фото: {photo}"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_point_actions(point_id))
+    await callback.answer()
+
+
+# Coords flow
+
+@admin_router.callback_query(F.data.startswith("admin:coords:"))
+async def cb_admin_set_coords(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    await state.update_data(point_id=point_id)
+    await state.set_state(AdminPoint.waiting_coords)
+    await callback.message.edit_text(
+        f"📍 Введи координаты для <b>Точки {point_id}</b>:\n\n"
+        "Формат: <code>55.751244 37.618423</code>\n"
+        "(широта и долгота через пробел)"
+    )
+    await callback.answer()
+
+
+@admin_router.message(AdminPoint.waiting_coords)
+async def msg_admin_coords(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    point_id: int = data["point_id"]
+
+    try:
+        parts = message.text.strip().replace(",", ".").split()
+        lat, lon = float(parts[0]), float(parts[1])
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            raise ValueError
+    except (ValueError, IndexError):
+        await message.answer(
+            "❌ Неверный формат.\nПример: <code>55.751244 37.618423</code>"
+        )
+        return
+
+    await db.update_point_coords(point_id, lat, lon)
+    await state.set_state(AdminPoint.waiting_photo)
+    await message.answer(
+        f"✅ Координаты Точки {point_id} сохранены: <code>{lat}, {lon}</code>\n\n"
+        "Теперь отправь фото для этой точки:"
+    )
+
+
+# Photo flow
+
+@admin_router.callback_query(F.data.startswith("admin:photo:"))
+async def cb_admin_set_photo(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    await state.update_data(point_id=point_id)
+    await state.set_state(AdminPoint.waiting_photo)
+    await callback.message.edit_text(f"🖼 Отправь фото для <b>Точки {point_id}</b>:")
+    await callback.answer()
+
+
+@admin_router.message(AdminPoint.waiting_photo, F.photo)
+async def msg_admin_photo(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    point_id: int = data["point_id"]
+
+    file_id = message.photo[-1].file_id
+    await db.update_point_photo(point_id, file_id)
+    await state.clear()
+
+    points = await db.get_points()
+    await message.answer(
+        f"✅ Фото для Точки {point_id} сохранено!",
+        reply_markup=admin_points_menu(points),
+    )
+
+
+@admin_router.message(AdminPoint.waiting_photo)
+async def msg_admin_photo_wrong(message: Message) -> None:
+    await message.answer("❌ Нужно отправить именно фото (не файл, не стикер).")
+
+
+# ── Players ───────────────────────────────────────────────────────────────────
+
+@admin_router.callback_query(F.data == "admin:players")
+async def cb_admin_players(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    users = await db.get_all_users()
+    if not users:
+        await callback.message.edit_text(
+            "👥 Нет зарегистрированных игроков.", reply_markup=admin_main_menu()
+        )
+        await callback.answer()
+        return
+    await callback.message.edit_text("👥 Игроки:", reply_markup=admin_players_menu(users))
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:player:"))
+async def cb_admin_player_detail(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = int(callback.data.split(":")[2])
+    users = await db.get_all_users()
+    user = next((u for u in users if u["user_id"] == user_id), None)
+    if not user:
+        await callback.answer("Игрок не найден", show_alert=True)
+        return
+
+    cd = f"⏳ до {user['cooldown_until']}" if user["cooldown_until"] else "нет"
+    text = (
+        f"👤 ID: <code>{user_id}</code>\n"
+        f"⏱ Кулдаун: {cd}\n"
+        f"🏆 Закрыто точек: {user['points_count']}"
+    )
+    await callback.message.edit_text(
+        text, reply_markup=admin_player_actions(user_id, bool(user["cooldown_until"]))
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:reset_cd:"))
+async def cb_admin_reset_cd(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = int(callback.data.split(":")[2])
+    await db.reset_user_cooldown(user_id)
+    await callback.answer("✅ Кулдаун сброшен")
+
+    users = await db.get_all_users()
+    user  = next((u for u in users if u["user_id"] == user_id), None)
+    if user:
+        text = (
+            f"👤 ID: <code>{user_id}</code>\n"
+            f"⏱ Кулдаун: нет\n"
+            f"🏆 Закрыто точек: {user['points_count']}"
+        )
+        await callback.message.edit_text(
+            text, reply_markup=admin_player_actions(user_id, False)
+        )
+
+
+@admin_router.callback_query(F.data.startswith("admin:reset_all:"))
+async def cb_admin_reset_all(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    user_id = int(callback.data.split(":")[2])
+    await db.reset_user_progress(user_id)
+    await callback.answer("✅ Прогресс игрока полностью сброшен")
+
+    users = await db.get_all_users()
+    await callback.message.edit_text("👥 Игроки:", reply_markup=admin_players_menu(users))
+
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+
+@admin_router.callback_query(F.data == "admin:settings")
+async def cb_admin_settings(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.clear()
+    refresh_sec  = await db.get_setting("refresh_delay_sec")
+    cooldown_min = await db.get_setting("activation_cooldown_min")
+    await callback.message.edit_text(
+        "🔧 Настройки бота:",
+        reply_markup=admin_settings_menu(refresh_sec, cooldown_min),
+    )
+    await callback.answer()
+
+
+_SETTING_LABELS = {
+    "refresh_delay_sec":       "задержку кнопки Обновить (секунды, целое > 0)",
+    "activation_cooldown_min": "кулдаун после активации (минуты, целое > 0)",
+}
+
+
+@admin_router.callback_query(F.data.startswith("admin:set:"))
+async def cb_admin_set_setting(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    key = callback.data.split(":", 2)[2]
+    await state.update_data(setting_key=key)
+    await state.set_state(AdminSettings.waiting_value)
+    label = _SETTING_LABELS.get(key, key)
+    await callback.message.edit_text(f"✏️ Введи новое значение для:\n<b>{label}</b>")
+    await callback.answer()
+
+
+@admin_router.message(AdminSettings.waiting_value)
+async def msg_admin_setting_value(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    key: str = data["setting_key"]
+
+    try:
+        val = int(message.text.strip())
+        if val <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введи целое положительное число.")
+        return
+
+    await db.set_setting(key, str(val))
+    await state.clear()
+
+    refresh_sec  = await db.get_setting("refresh_delay_sec")
+    cooldown_min = await db.get_setting("activation_cooldown_min")
+    await message.answer(
+        "✅ Настройка сохранена!",
+        reply_markup=admin_settings_menu(refresh_sec, cooldown_min),
+    )

@@ -1,0 +1,10 @@
+services:
+  geocaching_bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_IDS=${ADMIN_IDS}
+      - DB_PATH=/data/quest.db
+    volumes:
+      - ./data:/data
