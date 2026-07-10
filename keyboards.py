@@ -40,6 +40,7 @@ def admin_points_menu(points: list[dict]) -> InlineKeyboardMarkup:
 
 def admin_point_actions(point_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
+    b.button(text="👁 Показать точку",       callback_data=f"admin:preview:{point_id}")
     b.button(text="📍 Изменить координаты", callback_data=f"admin:coords:{point_id}")
     b.button(text="🖼 Изменить фото",        callback_data=f"admin:photo:{point_id}")
     b.button(text="🗑 Удалить точку",        callback_data=f"admin:delete_point:{point_id}")
