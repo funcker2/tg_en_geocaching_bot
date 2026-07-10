@@ -152,7 +152,7 @@ async def cb_admin_preview_point(callback: CallbackQuery) -> None:
 
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     back_kb = InlineKeyboardBuilder()
-    back_kb.button(text="◀️ Назад", callback_data=f"admin:point:{point_id}")
+    back_kb.button(text="◀️ Назад", callback_data=f"admin:preview_back:{point_id}")
     back_markup = back_kb.as_markup()
 
     if has_photo:
@@ -164,9 +164,34 @@ async def cb_admin_preview_point(callback: CallbackQuery) -> None:
         await callback.answer()
     else:
         await callback.answer("Фото не загружено", show_alert=True)
-        # Still show coordinates as text below the current message
         if has_coords:
             await callback.message.answer(caption, reply_markup=back_markup)
+
+
+@admin_router.callback_query(F.data.startswith("admin:preview_back:"))
+async def cb_admin_preview_back(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    point = await db.get_point(point_id)
+    await callback.message.delete()
+    if not point:
+        points = await db.get_points()
+        await callback.message.answer("⚙️ Точки квеста:", reply_markup=admin_points_menu(points))
+        await callback.answer()
+        return
+    coords = (
+        f"<code>{point['lat']}, {point['lon']}</code>"
+        if point["lat"] is not None else "не задано"
+    )
+    photo = "✅ загружено" if point["photo_file_id"] else "❌ не загружено"
+    text = (
+        f"<b>{point['label']}</b>\n\n"
+        f"📍 Координаты: {coords}\n"
+        f"🖼 Фото: {photo}"
+    )
+    await callback.message.answer(text, reply_markup=admin_point_actions(point_id))
+    await callback.answer()
 
 
 # Add point flow
