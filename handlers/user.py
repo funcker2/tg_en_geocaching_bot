@@ -11,14 +11,11 @@ from keyboards import (
     activate_keyboard,
     language_select_keyboard,
     location_keyboard,
-    refresh_keyboard,
 )
 from utils.geo import haversine_m
 from utils.timer import (
     cancel_cooldown_display,
-    is_refresh_locked,
     start_cooldown_display,
-    start_refresh_timer,
 )
 
 user_router = Router()
@@ -81,15 +78,11 @@ def _build_distances(
 @user_router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     user = await db.get_or_create_user(message.from_user.id)
+    lang = user["lang"] or "ru"
 
     if not user["lang"]:
-        await message.answer(
-            "🌐 Выберите язык / Изберете език:",
-            reply_markup=language_select_keyboard(),
-        )
-        return
+        await db.set_user_lang(message.from_user.id, "ru")
 
-    lang = user["lang"]
     remaining = _remaining_seconds(user["cooldown_until"])
     if remaining > 0:
         await message.answer(t(lang, "cooldown_gate", time=_fmt_time(remaining)))
@@ -160,78 +153,11 @@ async def on_location(message: Message, bot: Bot) -> None:
     activated = await db.get_user_activated_points(user_id)
     text, nearby = _build_distances(lat, lon, points, activated, lang)
 
-    await message.answer(text, reply_markup=refresh_keyboard(lang=lang))
+    await message.answer(text)
 
     if nearby:
         point = next(p for p in points if p["id"] == nearby[0])
         await message.answer(
-            t(lang, "at_point_prompt", label=point["label"]),
-            reply_markup=activate_keyboard(nearby[0], lang),
-        )
-
-
-# ── Refresh button ────────────────────────────────────────────────────────────
-
-@user_router.callback_query(F.data == "user:refresh")
-async def cb_refresh(callback: CallbackQuery, bot: Bot) -> None:
-    user_id = callback.from_user.id
-    user    = await db.get_or_create_user(user_id)
-    lang    = user["lang"] or "ru"
-
-    if is_refresh_locked(user_id):
-        await callback.answer(t(lang, "refresh_locked"), show_alert=False)
-        return
-
-    remaining = _remaining_seconds(user["cooldown_until"])
-    if remaining > 0:
-        await callback.answer(t(lang, "cooldown_active", time=_fmt_time(remaining)), show_alert=True)
-        return
-
-    if not user["last_lat"]:
-        await callback.answer(t(lang, "no_cached_location"), show_alert=True)
-        return
-
-    refresh_sec = int(await db.get_setting("refresh_delay_sec"))
-    points      = await db.get_points()
-    activated   = await db.get_user_activated_points(user_id)
-    text, nearby = _build_distances(user["last_lat"], user["last_lon"], points, activated, lang)
-
-    msg = callback.message
-
-    async def on_tick(sec: int) -> None:
-        try:
-            await bot.edit_message_reply_markup(
-                chat_id=msg.chat.id,
-                message_id=msg.message_id,
-                reply_markup=refresh_keyboard(
-                    label=t(lang, "btn_refresh_countdown", sec=sec), lang=lang
-                ),
-            )
-        except Exception:
-            pass
-
-    async def on_done() -> None:
-        try:
-            await bot.edit_message_reply_markup(
-                chat_id=msg.chat.id,
-                message_id=msg.message_id,
-                reply_markup=refresh_keyboard(lang=lang),
-            )
-        except Exception:
-            pass
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=refresh_keyboard(
-            label=t(lang, "btn_refresh_countdown", sec=refresh_sec), lang=lang
-        ),
-    )
-    start_refresh_timer(user_id, refresh_sec, on_tick, on_done)
-    await callback.answer()
-
-    if nearby:
-        point = next(p for p in points if p["id"] == nearby[0])
-        await callback.message.answer(
             t(lang, "at_point_prompt", label=point["label"]),
             reply_markup=activate_keyboard(nearby[0], lang),
         )

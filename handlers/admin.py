@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 import db
 from config import ADMINS
+from i18n import t
 from keyboards import (
     admin_delete_confirm,
     admin_main_menu,
@@ -15,7 +16,6 @@ from keyboards import (
     admin_point_actions,
     admin_points_menu,
     admin_settings_menu,
-    language_select_keyboard,
     location_keyboard,
 )
 from states import AdminPoint, AdminSettings
@@ -81,13 +81,10 @@ async def cb_play_as_user(callback: CallbackQuery, state: FSMContext) -> None:
     if not is_admin(callback.from_user.id):
         return
     await state.clear()
-    # Reset language so the selection screen appears fresh
-    await db.reset_user_lang(callback.from_user.id)
+    lang = "ru"
+    await db.set_user_lang(callback.from_user.id, lang)
     await callback.message.edit_text("🎮 Режим игрока активирован!")
-    await callback.message.answer(
-        "🌐 Выберите язык / Изберете език:",
-        reply_markup=language_select_keyboard(),
-    )
+    await callback.message.answer(t(lang, "welcome"), reply_markup=location_keyboard(lang))
     await callback.answer()
 
 
