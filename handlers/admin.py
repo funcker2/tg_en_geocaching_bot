@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 import db
 from config import ADMINS
 from keyboards import (
+    admin_delete_confirm,
     admin_main_menu,
     admin_player_actions,
     admin_players_menu,
@@ -124,6 +125,75 @@ async def cb_admin_point_detail(callback: CallbackQuery) -> None:
         f"🖼 Фото: {photo}"
     )
     await callback.message.edit_text(text, reply_markup=admin_point_actions(point_id))
+    await callback.answer()
+
+
+# Add point flow
+
+@admin_router.callback_query(F.data == "admin:add_point")
+async def cb_admin_add_point(callback: CallbackQuery, state: FSMContext) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    await state.set_state(AdminPoint.waiting_label)
+    await callback.message.edit_text(
+        "➕ Введи название новой точки:\n\n"
+        "Например: <code>Точка 6</code> или <code>Тайник у фонтана</code>\n\n"
+        "/cancel — отменить"
+    )
+    await callback.answer()
+
+
+@admin_router.message(AdminPoint.waiting_label)
+async def msg_admin_point_label(message: Message, state: FSMContext) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    label = message.text.strip()
+    if not label:
+        await message.answer("❌ Название не может быть пустым.")
+        return
+    point_id = await db.add_point(label)
+    await state.update_data(point_id=point_id)
+    await state.set_state(AdminPoint.waiting_coords)
+    await message.answer(
+        f"✅ Точка <b>{label}</b> создана (ID {point_id}).\n\n"
+        f"📍 Теперь введи координаты:\n"
+        f"Пример: <code>55.751244 37.618423</code>\n\n"
+        f"/cancel — пропустить"
+    )
+
+
+# Delete point flow
+
+@admin_router.callback_query(F.data.startswith("admin:delete_point:"))
+async def cb_admin_delete_point(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    point = await db.get_point(point_id)
+    if not point:
+        await callback.answer("Точка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"🗑 Удалить <b>{point['label']}</b>?\n\n"
+        "Это также удалит все активации этой точки у игроков.",
+        reply_markup=admin_delete_confirm(point_id, point["label"]),
+    )
+    await callback.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin:delete_confirm:"))
+async def cb_admin_delete_confirm(callback: CallbackQuery) -> None:
+    if not is_admin(callback.from_user.id):
+        return
+    point_id = int(callback.data.split(":")[2])
+    point = await db.get_point(point_id)
+    label = point["label"] if point else f"#{point_id}"
+    await db.delete_point(point_id)
+    points = await db.get_points()
+    await callback.message.edit_text(
+        f"✅ Точка <b>{label}</b> удалена.",
+        reply_markup=admin_points_menu(points),
+    )
     await callback.answer()
 
 

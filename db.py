@@ -76,6 +76,22 @@ async def get_point(point_id: int) -> dict | None:
             return dict(row) if row else None
 
 
+async def add_point(label: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO points (label) VALUES (?)", (label,)
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_point(point_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM user_points WHERE point_id = ?", (point_id,))
+        await db.execute("DELETE FROM points WHERE id = ?", (point_id,))
+        await db.commit()
+
+
 async def update_point_coords(point_id: int, lat: float, lon: float) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

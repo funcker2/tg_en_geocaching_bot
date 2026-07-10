@@ -32,7 +32,8 @@ def admin_points_menu(points: list[dict]) -> InlineKeyboardMarkup:
         else:
             icon = "❌"
         b.button(text=f"{icon} {p['label']}", callback_data=f"admin:point:{p['id']}")
-    b.button(text="◀️ Назад", callback_data="admin:main")
+    b.button(text="➕ Добавить точку", callback_data="admin:add_point")
+    b.button(text="◀️ Назад",         callback_data="admin:main")
     b.adjust(1)
     return b.as_markup()
 
@@ -41,8 +42,17 @@ def admin_point_actions(point_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="📍 Изменить координаты", callback_data=f"admin:coords:{point_id}")
     b.button(text="🖼 Изменить фото",        callback_data=f"admin:photo:{point_id}")
+    b.button(text="🗑 Удалить точку",        callback_data=f"admin:delete_point:{point_id}")
     b.button(text="◀️ Назад",               callback_data="admin:points")
     b.adjust(1)
+    return b.as_markup()
+
+
+def admin_delete_confirm(point_id: int, label: str) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="✅ Да, удалить", callback_data=f"admin:delete_confirm:{point_id}")
+    b.button(text="❌ Отмена",      callback_data=f"admin:point:{point_id}")
+    b.adjust(2)
     return b.as_markup()
 
 
