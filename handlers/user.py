@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
@@ -5,20 +6,37 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import CallbackQuery, Message
 
 import db
-from config import ACTIVATION_RADIUS_M
+from config import (
+    ACCURACY_BONUS_CAP_M,
+    ACTIVATION_RADIUS_M,
+    LIVE_EDIT_MIN_INTERVAL_S,
+    LOCATION_STALE_S,
+    POOR_ACCURACY_THRESHOLD_M,
+)
 from i18n import t
 from keyboards import (
     activate_keyboard,
     language_select_keyboard,
     location_keyboard,
 )
-from utils.geo import haversine_m
+from utils.geo import fuse_fix, haversine_m
 from utils.timer import (
     cancel_cooldown_display,
     start_cooldown_display,
 )
 
 user_router = Router()
+
+# Per-user live-location session state (in-process, not persisted — a restart
+# simply means the next live-location edit re-creates the status message).
+# live_msg:          (chat_id, message_id) of the status message being edited in place
+# last_edit_monotonic: loop.time() of the last successful edit, for throttling
+# prompted:          point ids currently shown with an "activate?" prompt, so we
+#                     don't resend it on every ~5-20s live-location tick while
+#                     the player is just standing near the point
+_live_msg: dict[int, tuple[int, int]] = {}
+_live_last_edit: dict[int, float] = {}
+_live_prompted: dict[int, set[int]] = {}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,16 +61,66 @@ def _remaining_seconds(cooldown_until: str | None) -> int:
         return 0
 
 
+def _age_seconds(loc_at_iso: str | None) -> float | None:
+    if not loc_at_iso:
+        return None
+    try:
+        at = datetime.fromisoformat(loc_at_iso).replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - at).total_seconds())
+    except Exception:
+        return None
+
+
+def _effective_radius(accuracy: float | None) -> float:
+    """
+    Activation radius, generously widened while the GPS fix is still
+    imprecise. Capped so a very poor fix can't be used to fake proximity to
+    a point that's genuinely far away.
+    """
+    if not accuracy or accuracy <= 0:
+        return ACTIVATION_RADIUS_M
+    return ACTIVATION_RADIUS_M + min(accuracy, ACCURACY_BONUS_CAP_M)
+
+
+async def _ingest_fix(
+    user_id: int,
+    prev_user: dict,
+    lat: float,
+    lon: float,
+    accuracy: float | None,
+) -> tuple[float, float, float | None]:
+    """
+    Fuse the new raw fix with the last known one (if fresh) and persist it.
+    Returns the (possibly smoothed) lat/lon to use for this update, plus the
+    raw accuracy actually reported for this fix (used for hints/effective radius).
+    """
+    prev_age = _age_seconds(prev_user.get("last_loc_at"))
+    fused_lat, fused_lon = fuse_fix(
+        prev_user.get("last_lat"),
+        prev_user.get("last_lon"),
+        prev_user.get("last_accuracy"),
+        prev_age,
+        lat,
+        lon,
+        accuracy,
+    )
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.update_user_location(user_id, fused_lat, fused_lon, accuracy, now_iso)
+    return fused_lat, fused_lon, accuracy
+
+
 def _build_distances(
     user_lat: float,
     user_lon: float,
     points: list[dict],
     activated_ids: list[int],
     lang: str,
+    accuracy: float | None = None,
 ) -> tuple[str, list[int]]:
     """Return (formatted distances text, list of nearby unclaimed point IDs)."""
     lines: list[str] = []
     nearby: list[int] = []
+    radius = _effective_radius(accuracy)
 
     for p in points:
         done_mark = " ✔️" if p["id"] in activated_ids else ""
@@ -62,13 +130,20 @@ def _build_distances(
 
         dist = haversine_m(user_lat, user_lon, p["lat"], p["lon"])
 
-        if dist <= ACTIVATION_RADIUS_M and p["id"] not in activated_ids:
+        if dist <= radius and p["id"] not in activated_ids:
             lines.append(f"🎯 {p['label']} — {_fmt_dist(dist)}{done_mark}")
             nearby.append(p["id"])
         elif dist <= ACTIVATION_RADIUS_M * 5:
             lines.append(f"🔥 {p['label']} — {_fmt_dist(dist)}{done_mark}")
         else:
             lines.append(f"📍 {p['label']} — {_fmt_dist(dist)}{done_mark}")
+
+    if accuracy and accuracy > POOR_ACCURACY_THRESHOLD_M:
+        lines.append("")
+        lines.append(t(lang, "accuracy_poor_hint", acc=int(accuracy)))
+    elif accuracy:
+        lines.append("")
+        lines.append(t(lang, "accuracy_footer", acc=int(accuracy)))
 
     return "\n".join(lines), nearby
 
@@ -145,13 +220,19 @@ async def on_location(message: Message, bot: Bot) -> None:
         await message.answer(t(lang, "cooldown_still", time=_fmt_time(remaining)))
         return
 
-    lat = message.location.latitude
-    lon = message.location.longitude
-    await db.update_user_location(user_id, lat, lon)
+    is_first_fix = user.get("last_loc_at") is None
+    is_live       = message.location.live_period is not None
+
+    lat, lon, accuracy = await _ingest_fix(
+        user_id, user,
+        message.location.latitude,
+        message.location.longitude,
+        message.location.horizontal_accuracy,
+    )
 
     points    = await db.get_points()
     activated = await db.get_user_activated_points(user_id)
-    text, nearby = _build_distances(lat, lon, points, activated, lang)
+    text, nearby = _build_distances(lat, lon, points, activated, lang, accuracy)
 
     await message.answer(text)
 
@@ -161,6 +242,66 @@ async def on_location(message: Message, bot: Bot) -> None:
             t(lang, "at_point_prompt", label=point["label"]),
             reply_markup=activate_keyboard(nearby[0], lang),
         )
+        _live_prompted.setdefault(user_id, set()).add(nearby[0])
+
+    if is_first_fix and not is_live:
+        await message.answer(t(lang, "live_location_tip"))
+
+
+@user_router.edited_message(F.location)
+async def on_location_edited(message: Message, bot: Bot) -> None:
+    """
+    Handle continuous updates from Telegram's "Share Live Location". These
+    arrive every ~5-20s while the player is moving, without any extra tap —
+    this is what actually removes the "wait and re-send" delay from the
+    old one-shot flow. The distances message is edited in place (throttled)
+    instead of spamming a new message per tick; the activation prompt is
+    only (re-)sent when a point transitions into range.
+    """
+    user_id = message.from_user.id
+    user    = await db.get_or_create_user(user_id)
+    lang    = user["lang"] or "ru"
+
+    if _remaining_seconds(user["cooldown_until"]) > 0:
+        return
+
+    lat, lon, accuracy = await _ingest_fix(
+        user_id, user,
+        message.location.latitude,
+        message.location.longitude,
+        message.location.horizontal_accuracy,
+    )
+
+    points    = await db.get_points()
+    activated = await db.get_user_activated_points(user_id)
+    text, nearby = _build_distances(lat, lon, points, activated, lang, accuracy)
+    nearby_set = set(nearby)
+
+    loop = asyncio.get_event_loop()
+    last_edit = _live_last_edit.get(user_id, 0.0)
+    chat_id, msg_id = _live_msg.get(user_id, (message.chat.id, None))
+
+    if msg_id is None:
+        sent = await bot.send_message(chat_id=message.chat.id, text=text)
+        _live_msg[user_id] = (message.chat.id, sent.message_id)
+        _live_last_edit[user_id] = loop.time()
+    elif loop.time() - last_edit >= LIVE_EDIT_MIN_INTERVAL_S:
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text)
+        except Exception:
+            pass
+        _live_last_edit[user_id] = loop.time()
+
+    prompted = _live_prompted.setdefault(user_id, set())
+    newly_nearby = nearby_set - prompted
+    if newly_nearby:
+        point_id = next(iter(newly_nearby))
+        point = next(p for p in points if p["id"] == point_id)
+        await message.answer(
+            t(lang, "at_point_prompt", label=point["label"]),
+            reply_markup=activate_keyboard(point_id, lang),
+        )
+    _live_prompted[user_id] = set(nearby_set)
 
 
 # ── Activation ────────────────────────────────────────────────────────────────
@@ -197,8 +338,13 @@ async def cb_activate(callback: CallbackQuery, bot: Bot) -> None:
         return
 
     if user["last_lat"] and point["lat"] is not None:
+        age = _age_seconds(user.get("last_loc_at"))
+        if age is not None and age > LOCATION_STALE_S:
+            await callback.answer(t(lang, "location_stale"), show_alert=True)
+            return
+
         dist = haversine_m(user["last_lat"], user["last_lon"], point["lat"], point["lon"])
-        if dist > ACTIVATION_RADIUS_M * 4:
+        if dist > _effective_radius(user.get("last_accuracy")) * 4:
             await callback.answer(t(lang, "too_far"), show_alert=True)
             return
 

@@ -28,6 +28,8 @@ async def init_db() -> None:
                 cooldown_until TEXT,
                 last_lat       REAL,
                 last_lon       REAL,
+                last_accuracy  REAL,
+                last_loc_at    TEXT,
                 created_at     TEXT NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -50,11 +52,15 @@ async def init_db() -> None:
         await db.execute("INSERT OR IGNORE INTO settings VALUES ('refresh_delay_sec', '10')")
         await db.execute("INSERT OR IGNORE INTO settings VALUES ('activation_cooldown_min', '10')")
 
-        # Migration: add lang column to existing deployments
+        # Migration: add columns introduced after initial deployments
         async with db.execute("PRAGMA table_info(users)") as cur:
             cols = [row[1] for row in await cur.fetchall()]
         if "lang" not in cols:
             await db.execute("ALTER TABLE users ADD COLUMN lang TEXT")
+        if "last_accuracy" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN last_accuracy REAL")
+        if "last_loc_at" not in cols:
+            await db.execute("ALTER TABLE users ADD COLUMN last_loc_at TEXT")
 
         await db.commit()
 
@@ -123,11 +129,18 @@ async def get_or_create_user(user_id: int) -> dict:
             return dict(await cur.fetchone())
 
 
-async def update_user_location(user_id: int, lat: float, lon: float) -> None:
+async def update_user_location(
+    user_id: int,
+    lat: float,
+    lon: float,
+    accuracy: float | None,
+    loc_at_iso: str,
+) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE users SET last_lat = ?, last_lon = ? WHERE user_id = ?",
-            (lat, lon, user_id),
+            "UPDATE users SET last_lat = ?, last_lon = ?, last_accuracy = ?, last_loc_at = ? "
+            "WHERE user_id = ?",
+            (lat, lon, accuracy, loc_at_iso, user_id),
         )
         await db.commit()
 
