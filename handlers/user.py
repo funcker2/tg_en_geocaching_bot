@@ -88,25 +88,32 @@ async def _ingest_fix(
     lat: float,
     lon: float,
     accuracy: float | None,
+    allow_fuse: bool = True,
 ) -> tuple[float, float, float | None]:
     """
-    Fuse the new raw fix with the last known one (if fresh) and persist it.
-    Returns the (possibly smoothed) lat/lon to use for this update, plus the
-    raw accuracy actually reported for this fix (used for hints/effective radius).
+    Optionally fuse the new raw fix with the last known one (if fresh), then
+    persist it. Returns the (possibly smoothed) lat/lon to use for this
+    update, plus the raw accuracy actually reported for this fix (used for
+    hints/effective radius).
+
+    allow_fuse=False for the live-location stream: consecutive ticks there
+    are genuinely different positions of a moving player, not repeated noisy
+    reads of one spot, so smoothing them would just lag behind real movement.
     """
-    prev_age = _age_seconds(prev_user.get("last_loc_at"))
-    fused_lat, fused_lon = fuse_fix(
-        prev_user.get("last_lat"),
-        prev_user.get("last_lon"),
-        prev_user.get("last_accuracy"),
-        prev_age,
-        lat,
-        lon,
-        accuracy,
-    )
+    if allow_fuse:
+        prev_age = _age_seconds(prev_user.get("last_loc_at"))
+        lat, lon = fuse_fix(
+            prev_user.get("last_lat"),
+            prev_user.get("last_lon"),
+            prev_user.get("last_accuracy"),
+            prev_age,
+            lat,
+            lon,
+            accuracy,
+        )
     now_iso = datetime.now(timezone.utc).isoformat()
-    await db.update_user_location(user_id, fused_lat, fused_lon, accuracy, now_iso)
-    return fused_lat, fused_lon, accuracy
+    await db.update_user_location(user_id, lat, lon, accuracy, now_iso)
+    return lat, lon, accuracy
 
 
 def _build_distances(
@@ -270,6 +277,7 @@ async def on_location_edited(message: Message, bot: Bot) -> None:
         message.location.latitude,
         message.location.longitude,
         message.location.horizontal_accuracy,
+        allow_fuse=False,
     )
 
     points    = await db.get_points()

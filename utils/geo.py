@@ -27,18 +27,26 @@ def fuse_fix(
     new_accuracy: float | None,
 ) -> tuple[float, float]:
     """
-    Cheap inverse-variance fusion of the new GPS fix with the previous one.
+    Cheap inverse-variance fusion of the new GPS fix with the previous one —
+    but ONLY when the two fixes plausibly describe the same physical spot.
 
-    A single raw fix from a phone can jump several metres between updates
-    (multipath, momentary loss of a satellite, etc.), which is what makes a
-    "just reached the point" check flicker. Weighting the last two fixes by
-    1/accuracy² (the same idea used in a basic Kalman filter) pulls the
-    estimate toward whichever reading is more trustworthy instead of jumping
-    to whatever the latest raw sample says, at zero extra latency.
+    A single raw fix from a phone can jump a few metres between updates
+    (multipath, momentary loss of a satellite, etc.) while the player is
+    standing still, which is what makes a "just reached the point" check
+    flicker; blending two such fixes by 1/accuracy² (the same idea used in a
+    basic Kalman filter) fixes that.
 
-    Only blends with a previous fix that is fresh (< _MAX_FUSE_AGE_S old) —
-    an old fix is a different physical position, not sensor noise, and must
-    not be averaged in.
+    But during live-location tracking while walking, consecutive fixes are
+    genuinely different positions, not noisy readings of the same one — a
+    person walking ~1.4 m/s covers 7-28m between typical 5-20s live-location
+    ticks. Averaging those pulls the reported position backwards to "where
+    they used to be", which is worse than just trusting the latest fix. So
+    fusion only kicks in when the implied movement is within the combined
+    GPS noise budget (sum of both accuracies); anything larger is treated as
+    real motion and the raw new fix is used as-is.
+
+    Only ever blends with a previous fix that is fresh (< _MAX_FUSE_AGE_S
+    old) — an old fix is definitely a different physical position by then.
     """
     if (
         prev_lat is None
@@ -50,6 +58,10 @@ def fuse_fix(
 
     a_prev = prev_accuracy if prev_accuracy and prev_accuracy > 0 else _DEFAULT_ACCURACY_M
     a_new = new_accuracy if new_accuracy and new_accuracy > 0 else _DEFAULT_ACCURACY_M
+
+    moved = haversine_m(prev_lat, prev_lon, new_lat, new_lon)
+    if moved > a_prev + a_new:
+        return new_lat, new_lon
 
     w_prev = 1 / (a_prev ** 2)
     w_new = 1 / (a_new ** 2)
