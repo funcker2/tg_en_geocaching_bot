@@ -59,6 +59,10 @@ async def test_password_lookup_normalized():
     tid = await _raw_team("X", "тигр-42")
     found = await db.get_team_by_password("  ТИГР-42 ")
     assert found["id"] == tid
+    for typed in ("тигр 42", "тигр42", "ТИГР-42", "Тигр, 42"):
+        assert (await db.get_team_by_password(typed))["id"] == tid
+    assert found["password"] == "тигр-42"  # display form kept
+    assert await db.get_team_by_password("") is None
     assert await db.get_team_by_password("нет-00") is None
 
 

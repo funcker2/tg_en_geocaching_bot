@@ -5,7 +5,7 @@ import re
 import aiosqlite
 
 import config
-from game import generate_passwords, normalize_code
+from game import generate_passwords, normalize_code, normalize_password
 
 # Kept as a module global so tests can monkeypatch `db.DB_PATH`.
 DB_PATH = config.DB_PATH
@@ -163,7 +163,7 @@ async def create_teams(n: int, is_test: bool = False) -> list[dict]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT name, password FROM teams")
         existing = await cur.fetchall()
-        used = {r["password"] for r in existing}
+        used = {normalize_password(r["password"]) for r in existing if r["password"]}
         numbers = [int(m.group(1)) for r in existing if r["name"] and (m := re.fullmatch(r"Команда (\d+)", r["name"]))]
         next_number = max(numbers, default=0) + 1
 
@@ -173,8 +173,8 @@ async def create_teams(n: int, is_test: bool = False) -> list[dict]:
             # Raises ValueError if a batch of this size is impossible.
             for pwd in generate_passwords(n, rng):
                 pwd = normalize_code(pwd)
-                if pwd not in used and len(passwords) < n:
-                    used.add(pwd)
+                if normalize_password(pwd) not in used and len(passwords) < n:
+                    used.add(normalize_password(pwd))
                     passwords.append(pwd)
             if len(passwords) < n and len(used) >= 4000:
                 raise ValueError("не хватает свободных паролей")
@@ -203,11 +203,14 @@ async def get_team(team_id: int) -> dict | None:
 
 
 async def get_team_by_password(password: str) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM teams WHERE password = ?", (normalize_code(password),))
-        row = await cur.fetchone()
-        return dict(row) if row else None
+    """Team whose stored (display) password matches after normalize_password."""
+    wanted = normalize_password(password)
+    if not wanted:
+        return None
+    for team in await list_teams():
+        if team["password"] and normalize_password(team["password"]) == wanted:
+            return team
+    return None
 
 
 async def list_teams() -> list[dict]:

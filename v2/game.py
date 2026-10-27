@@ -13,6 +13,12 @@ def normalize_code(s: str) -> str:
     return re.sub(r"\s+", "", s.lower().replace("ё", "е"))
 
 
+def normalize_password(s: str) -> str:
+    """Like normalize_code but also drops punctuation/underscores, so a dictated
+    'яблоко 42', 'яблоко42' and 'ЯБЛОКО-42' all match 'яблоко-42'."""
+    return re.sub(r"[\W_]+", "", s.lower().replace("ё", "е"))
+
+
 # ── Location ──────────────────────────────────────────────────────────────────
 
 

@@ -12,6 +12,7 @@ from game import (
     is_fresh_fix,
     is_stale,
     normalize_code,
+    normalize_password,
     rank_results,
 )
 
@@ -105,3 +106,11 @@ def test_is_fresh_fix_live_window():
     assert is_fresh_fix(ago(60), None, now) is True  # no live, 1 min old
     assert is_fresh_fix(ago(180), None, now) is False
     assert is_fresh_fix(None, live_on, now) is False
+
+
+def test_normalize_password_dictation():
+    target = normalize_password("яблоко-42")
+    for typed in ("яблоко 42", "яблоко42", "ЯБЛОКО-42", " Яблоко_42. ", "яблоко—42"):
+        assert normalize_password(typed) == target
+    assert normalize_password("ёлка-01") == normalize_password("елка 01")
+    assert normalize_password("яблоко-43") != target
