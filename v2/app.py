@@ -7,6 +7,7 @@ from aiogram.enums import ParseMode
 
 from config import TOKEN
 from db import init_db
+from handlers.admin import admin_router
 from handlers.player import player_router
 
 logging.basicConfig(
@@ -21,7 +22,8 @@ async def main() -> None:
     bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
 
-    # Task 5 will include admin_router BEFORE player_router
+    # admin_router first: its FSM-state handlers must win over the player catch-alls
+    dp.include_router(admin_router)
     dp.include_router(player_router)
 
     logging.info("Bot started")
