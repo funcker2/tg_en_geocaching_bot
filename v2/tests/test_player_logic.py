@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from handlers.player import PasswordThrottle, check_code, render_target
+from handlers.player import PasswordThrottle, check_code, is_trusted_fix, render_target
 
 NOW = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
 M = 1 / 111_195  # degrees of latitude per metre
@@ -31,8 +31,20 @@ def test_check_code_accuracy_bonus():
     assert check_code(member(22, accuracy=8), POINT, "елка7", NOW) == "ok"
 
 
-def test_check_code_wrong_first():
-    assert check_code(member(500), POINT, "нет", NOW) == "wrong"
+def test_check_code_wrong_far_is_far():
+    assert check_code(member(500), POINT, "нет", NOW) == "far"
+
+
+def test_check_code_wrong_near_is_wrong():
+    assert check_code(member(5), POINT, "нет", NOW) == "wrong"
+
+
+def test_is_trusted_fix():
+    assert is_trusted_fix(5.0, False, False, False)
+    assert not is_trusted_fix(None, False, False, False)  # map-picked pin
+    assert not is_trusted_fix(5.0, True, False, False)  # forwarded
+    assert not is_trusted_fix(5.0, False, True, False)  # venue
+    assert is_trusted_fix(None, False, False, True)  # live tick
 
 
 def test_check_code_stale():

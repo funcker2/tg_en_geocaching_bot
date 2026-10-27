@@ -1,5 +1,6 @@
 import asyncio
 import html
+import logging
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from states import PlayerLogin
 from utils.geo import haversine_m
 
 player_router = Router()
+log = logging.getLogger(__name__)
 
 # ── Password brute-force throttle ─────────────────────────────────────────────
 
@@ -96,9 +98,10 @@ def render_target(member: dict | None, point: dict) -> str:
 
 
 def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
-    """'ok' | 'wrong' | 'no_location' | 'stale' | 'far' (checked in that order)."""
-    if not point.get("code") or normalize_code(code) != normalize_code(point["code"]):
-        return "wrong"
+    """'ok' | 'wrong' | 'no_location' | 'stale' | 'far'.
+
+    Order: location present -> fresh -> within radius -> code. The code is
+    judged only on site, so a far-away player cannot probe codes."""
     if member.get("last_lat") is None or member.get("last_lon") is None:
         return "no_location"
     if is_stale(member.get("last_loc_at"), now):
@@ -108,7 +111,20 @@ def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
     dist = haversine_m(member["last_lat"], member["last_lon"], point["lat"], point["lon"])
     if dist > effective_radius(member.get("last_accuracy")):
         return "far"
+    if not point.get("code") or normalize_code(code) != normalize_code(point["code"]):
+        return "wrong"
     return "ok"
+
+
+def is_trusted_fix(accuracy: float | None, forwarded: bool, venue: bool, is_live: bool) -> bool:
+    """Whether a location may be stored and used for code checks.
+
+    Live ticks are always trusted. A one-shot location is trusted only if it is
+    not forwarded, not a venue, and carries horizontal_accuracy (a map-picked
+    pin has none, so it could be spoofed from the sofa)."""
+    if is_live:
+        return True
+    return not forwarded and not venue and accuracy is not None
 
 
 # ── Team state helpers ────────────────────────────────────────────────────────
@@ -152,8 +168,8 @@ async def notify_team(bot: Bot, team_id: int, text: str, exclude: int | None = N
             continue
         try:
             await bot.send_message(uid, text)
-        except Exception:
-            pass  # blocked bot / chat gone — don't break delivery to others
+        except Exception as exc:  # blocked bot / flood limit — don't break delivery to others
+            log.warning("notify_team: send to %s failed: %r", uid, exc)
 
 
 async def _ask_password(message: Message, state: FSMContext) -> None:
@@ -194,6 +210,10 @@ async def on_logout(message: Message, state: FSMContext) -> None:
 
 @player_router.message(PlayerLogin.waiting_password, F.text, ~F.text.startswith("/"))
 async def on_password(message: Message, state: FSMContext) -> None:
+    await _try_password(message, state)
+
+
+async def _try_password(message: Message, state: FSMContext) -> None:
     uid = message.from_user.id
     if _throttle.is_blocked(uid):
         await message.answer(texts.TOO_MANY_ATTEMPTS)
@@ -220,6 +240,15 @@ async def on_location(message: Message, state: FSMContext) -> None:
         await _ask_password(message, state)
         return
     loc = message.location
+    if not is_trusted_fix(
+        loc.horizontal_accuracy, message.forward_origin is not None, message.venue is not None, False
+    ):
+        if message.forward_origin is not None or message.venue is not None:
+            return  # forwarded / venue locations are ignored outright
+        # map-picked pin: show distance only, never store it for code checks
+        adhoc = {**member, "last_lat": loc.latitude, "last_lon": loc.longitude, "last_accuracy": None}
+        await message.answer(f"{await _state_text(team, adhoc)}\n\n{texts.PIN_NOT_TRUSTED}")
+        return
     await db.update_member_location(
         message.from_user.id, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat()
     )
@@ -264,7 +293,7 @@ async def on_code(message: Message, bot: Bot, state: FSMContext) -> None:
     uid = message.from_user.id
     member, team = await _member_and_team(uid)
     if member is None or team is None:
-        await message.answer(texts.NOT_IN_TEAM)
+        await _try_password(message, state)  # survives a restart wiping FSM storage
         return
 
     if team.get("finished_at") is not None:
@@ -307,6 +336,10 @@ async def _accept_code(message: Message, bot: Bot, team: dict, member: dict, poi
         body = await _final_text(adv)
         await notify_team(bot, team["id"], f"{taken}\n\n{body}")
         return
-    # each recipient has their own last fix; use the taker's for the shared message
-    taker = await db.get_member(uid)
-    await notify_team(bot, team["id"], f"{taken}\n\n{render_target(taker, nxt)}")
+    # each recipient sees the distance from their own last fix
+    for member_id in await db.get_team_member_ids(team["id"]):
+        try:
+            text = f"{taken}\n\n{render_target(await db.get_member(member_id), nxt)}"
+            await bot.send_message(member_id, text)
+        except Exception as exc:
+            log.warning("next-point send to %s failed: %r", member_id, exc)
