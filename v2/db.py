@@ -251,6 +251,15 @@ async def join_team(user_id: int, team_id: int, now_iso: str) -> dict:
         return dict(await cur.fetchone())
 
 
+async def ensure_started(team_id: int, now_iso: str) -> None:
+    """Start the team's clock if it is not running (e.g. after an admin reset)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE teams SET started_at = ? WHERE id = ? AND started_at IS NULL", (now_iso, team_id)
+        )
+        await db.commit()
+
+
 async def leave_team(user_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM members WHERE user_id = ?", (user_id,))
@@ -294,21 +303,24 @@ async def advance_team(
         db.row_factory = aiosqlite.Row
         if expected_position == total_points:
             cur = await db.execute(
-                "UPDATE teams SET current_position = current_position + 1, finished_at = ? "
+                "UPDATE teams SET current_position = current_position + 1, finished_at = ?, "
+                "started_at = COALESCE(started_at, ?) "
                 "WHERE id = ? AND current_position = ? AND finished_at IS NULL",
-                (now_iso, team_id, expected_position),
+                (now_iso, now_iso, team_id, expected_position),
             )
         else:
             cur = await db.execute(
-                "UPDATE teams SET current_position = current_position + 1 "
+                "UPDATE teams SET current_position = current_position + 1, "
+                "started_at = COALESCE(started_at, ?) "
                 "WHERE id = ? AND current_position = ? AND finished_at IS NULL",
-                (team_id, expected_position),
+                (now_iso, team_id, expected_position),
             )
         if cur.rowcount != 1:
             await db.rollback()
             return None
+        # OR REPLACE: an admin may move an already-taken point ahead; retaking it must not get stuck
         await db.execute(
-            "INSERT INTO team_points (team_id, point_id, taken_at, taken_by) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO team_points (team_id, point_id, taken_at, taken_by) VALUES (?, ?, ?, ?)",
             (team_id, point_id, now_iso, user_id),
         )
         await db.commit()

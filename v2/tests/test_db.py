@@ -176,3 +176,39 @@ async def test_live_until_stored_and_migrated(tmp_path, monkeypatch):
     async with aiosqlite.connect(old) as conn:
         cur = await conn.execute("PRAGMA table_info(members)")
         assert "live_until" in [r[1] for r in await cur.fetchall()]
+
+
+async def test_ensure_started_after_reset():
+    team = (await db.create_teams(1))[0]
+    await db.join_team(7, team["id"], "t1")
+    await db.reset_progress(False)
+    assert (await db.get_team(team["id"]))["started_at"] is None
+    await db.ensure_started(team["id"], "t2")
+    assert (await db.get_team(team["id"]))["started_at"] == "t2"
+    await db.ensure_started(team["id"], "t3")  # never overwrites
+    assert (await db.get_team(team["id"]))["started_at"] == "t2"
+
+
+async def test_advance_fills_missing_start():
+    team = (await db.create_teams(1))[0]
+    p1 = await db.add_point("A", 1.0, 1.0, "a")
+    await db.add_point("B", 1.0, 1.0, "b")
+    res = await db.advance_team(team["id"], 1, p1, 5, "t1", 2)
+    assert res["started_at"] == "t1"
+    p2 = (await db.get_points())[1]["id"]
+    res = await db.advance_team(team["id"], 2, p2, 5, "t2", 2)
+    assert res["started_at"] == "t1" and res["finished_at"] == "t2"
+
+
+async def test_advance_after_point_reordered_ahead():
+    team = (await db.create_teams(1))[0]
+    a = await db.add_point("A", 1.0, 1.0, "a")
+    await db.add_point("B", 1.0, 1.0, "b")
+    await db.add_point("C", 1.0, 1.0, "c")
+    await db.advance_team(team["id"], 1, a, 5, "t1", 3)
+    await db.move_point(a, 1)  # admin moves the taken point ahead: B, A, C
+    res = await db.advance_team(team["id"], 2, a, 6, "t2", 3)
+    assert res is not None and res["current_position"] == 3
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        cur = await conn.execute("SELECT taken_at, taken_by FROM team_points WHERE point_id = ?", (a,))
+        assert await cur.fetchall() == [("t2", 6)]

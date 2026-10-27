@@ -190,9 +190,11 @@ async def _ask_password(message: Message, state: FSMContext) -> None:
 
 
 async def _member_and_team(user_id: int) -> tuple[dict | None, dict | None]:
+    """Member and team of a player; any interaction (re)starts the team clock."""
     member = await db.get_member(user_id)
     if member is None:
         return None, None
+    await db.ensure_started(member["team_id"], _now().isoformat())
     return member, await db.get_team(member["team_id"])
 
 
