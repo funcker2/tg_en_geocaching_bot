@@ -91,3 +91,15 @@ def test_password_throttle():
     assert not th.is_blocked(2)
     clock[0] = 601.0
     assert not th.is_blocked(1)  # window elapsed
+
+
+async def test_final_text_escapes_hint(monkeypatch):
+    import db
+    from handlers import player
+
+    async def fake_setting(key):
+        return "<под лавкой> & 5"
+
+    monkeypatch.setattr(db, "get_setting", fake_setting)
+    text = await player._final_text({"started_at": None, "finished_at": None})
+    assert "&lt;под лавкой&gt; &amp; 5" in text

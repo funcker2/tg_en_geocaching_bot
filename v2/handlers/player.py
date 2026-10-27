@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
@@ -154,7 +155,8 @@ def _duration_text(team: dict) -> str:
 
 async def _final_text(team: dict) -> str:
     hint = await db.get_setting("final_hint")
-    return texts.FINAL_TEXT.format(hint=hint or texts.FINAL_NO_HINT, duration=_duration_text(team))
+    shown = html.escape(hint) if hint else texts.FINAL_NO_HINT
+    return texts.FINAL_TEXT.format(hint=shown, duration=_duration_text(team))
 
 
 async def _state_text(team: dict, member: dict | None) -> str:
@@ -314,12 +316,12 @@ async def on_code(message: Message, bot: Bot, state: FSMContext) -> None:
         await _try_password(message, state)  # survives a restart wiping FSM storage
         return
 
-    if team.get("finished_at") is not None:
-        await message.answer(await _final_text(team))
-        return
-    point = await db.get_current_point(team)
-    if point is None:  # route shortened by admin mid-game: treat as finished
-        await message.answer(await _final_text(team))
+    point = await db.get_current_point(team) if team.get("finished_at") is None else None
+    if point is None:  # finished, or route shortened by admin mid-game: treat as finished
+        try:
+            await message.answer(await _final_text(team))
+        except TelegramAPIError as exc:
+            log.warning("final text to %s failed: %r", uid, exc)
         return
 
     now = _now()
