@@ -1,0 +1,312 @@
+import asyncio
+import html
+import time
+from collections import deque
+from datetime import datetime, timezone
+from typing import Callable
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import default_state
+from aiogram.types import Message
+
+import db
+import texts
+from config import LIVE_EDIT_MIN_INTERVAL_S
+from game import (
+    bearing_deg,
+    direction_label,
+    effective_radius,
+    fmt_dist,
+    fmt_duration,
+    is_stale,
+    normalize_code,
+)
+from keyboards import location_keyboard
+from states import PlayerLogin
+from utils.geo import haversine_m
+
+player_router = Router()
+
+# ── Password brute-force throttle ─────────────────────────────────────────────
+
+PASSWORD_MAX_FAILS = 5
+PASSWORD_WINDOW_S = 600.0
+
+
+class PasswordThrottle:
+    """Per-user in-memory limiter: more than PASSWORD_MAX_FAILS wrong passwords
+    inside PASSWORD_WINDOW_S blocks checking until old failures age out."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._fails: dict[int, deque[float]] = {}
+
+    def _prune(self, user_id: int) -> deque[float]:
+        q = self._fails.setdefault(user_id, deque())
+        cutoff = self._clock() - PASSWORD_WINDOW_S
+        while q and q[0] <= cutoff:
+            q.popleft()
+        return q
+
+    def is_blocked(self, user_id: int) -> bool:
+        return len(self._prune(user_id)) > PASSWORD_MAX_FAILS
+
+    def record_fail(self, user_id: int) -> None:
+        self._prune(user_id).append(self._clock())
+
+    def reset(self, user_id: int) -> None:
+        self._fails.pop(user_id, None)
+
+
+_throttle = PasswordThrottle()
+
+# ── Live-location state (in-process) ──────────────────────────────────────────
+# user_id -> (chat_id, message_id, position of the point it was rendered for)
+_live_msg: dict[int, tuple[int, int, int]] = {}
+_live_last_edit: dict[int, float] = {}
+
+# ── Pure helpers ──────────────────────────────────────────────────────────────
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _label(point: dict) -> str:
+    return html.escape(point.get("label") or texts.POINT_NO_LABEL)
+
+
+def render_target(member: dict | None, point: dict) -> str:
+    """Point header + direction/distance from the member's last fix."""
+    head = texts.POINT_HEADER.format(n=point["position"], label=_label(point))
+    if member is None or member.get("last_lat") is None or member.get("last_lon") is None:
+        return f"{head}\n{texts.NO_LOCATION}"
+    if point.get("lat") is None or point.get("lon") is None:
+        return f"{head}\n{texts.NO_COORDS}"
+    lat, lon = member["last_lat"], member["last_lon"]
+    dist = haversine_m(lat, lon, point["lat"], point["lon"])
+    direction = direction_label(bearing_deg(lat, lon, point["lat"], point["lon"]))
+    lines = [head, texts.DIRECTION_LINE.format(direction=direction, dist=fmt_dist(dist))]
+    acc = member.get("last_accuracy")
+    if acc:
+        lines.append(texts.ACCURACY_LINE.format(acc=int(acc)))
+    return "\n".join(lines)
+
+
+def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
+    """'ok' | 'wrong' | 'no_location' | 'stale' | 'far' (checked in that order)."""
+    if not point.get("code") or normalize_code(code) != normalize_code(point["code"]):
+        return "wrong"
+    if member.get("last_lat") is None or member.get("last_lon") is None:
+        return "no_location"
+    if is_stale(member.get("last_loc_at"), now):
+        return "stale"
+    if point.get("lat") is None or point.get("lon") is None:
+        return "far"
+    dist = haversine_m(member["last_lat"], member["last_lon"], point["lat"], point["lon"])
+    if dist > effective_radius(member.get("last_accuracy")):
+        return "far"
+    return "ok"
+
+
+# ── Team state helpers ────────────────────────────────────────────────────────
+
+
+def _duration_text(team: dict) -> str:
+    if not team.get("started_at") or not team.get("finished_at"):
+        return "—"
+    start = datetime.fromisoformat(team["started_at"])
+    end = datetime.fromisoformat(team["finished_at"])
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return fmt_duration(int((end - start).total_seconds()))
+
+
+async def _final_text(team: dict) -> str:
+    hint = await db.get_setting("final_hint")
+    return texts.FINAL_TEXT.format(hint=hint or texts.FINAL_NO_HINT, duration=_duration_text(team))
+
+
+async def _state_text(team: dict, member: dict | None) -> str:
+    """Current point (with distance) or the final hint if the route is done."""
+    if team.get("finished_at") is None:
+        point = await db.get_current_point(team)
+        if point is not None:
+            return render_target(member, point)
+    return await _final_text(team)
+
+
+async def _forget_live(team_id: int) -> None:
+    for uid in await db.get_team_member_ids(team_id):
+        _live_msg.pop(uid, None)
+        _live_last_edit.pop(uid, None)
+
+
+async def notify_team(bot: Bot, team_id: int, text: str, exclude: int | None = None) -> None:
+    for uid in await db.get_team_member_ids(team_id):
+        if uid == exclude:
+            continue
+        try:
+            await bot.send_message(uid, text)
+        except Exception:
+            pass  # blocked bot / chat gone — don't break delivery to others
+
+
+async def _ask_password(message: Message, state: FSMContext) -> None:
+    await state.set_state(PlayerLogin.waiting_password)
+    await message.answer(texts.ASK_PASSWORD)
+
+
+async def _member_and_team(user_id: int) -> tuple[dict | None, dict | None]:
+    member = await db.get_member(user_id)
+    if member is None:
+        return None, None
+    return member, await db.get_team(member["team_id"])
+
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+
+
+@player_router.message(CommandStart())
+async def on_start(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    member, team = await _member_and_team(message.from_user.id)
+    if member is None or team is None:
+        await _ask_password(message, state)
+        return
+    await message.answer(
+        f"{await _state_text(team, member)}\n\n{texts.LIVE_TIP}", reply_markup=location_keyboard()
+    )
+
+
+@player_router.message(Command("logout"))
+async def on_logout(message: Message, state: FSMContext) -> None:
+    await db.leave_team(message.from_user.id)
+    _live_msg.pop(message.from_user.id, None)
+    _live_last_edit.pop(message.from_user.id, None)
+    await message.answer(texts.LEFT)
+    await _ask_password(message, state)
+
+
+@player_router.message(PlayerLogin.waiting_password, F.text, ~F.text.startswith("/"))
+async def on_password(message: Message, state: FSMContext) -> None:
+    uid = message.from_user.id
+    if _throttle.is_blocked(uid):
+        await message.answer(texts.TOO_MANY_ATTEMPTS)
+        return
+    team = await db.get_team_by_password(message.text.strip())
+    if team is None:
+        _throttle.record_fail(uid)
+        await message.answer(texts.WRONG_PASSWORD)
+        return
+    _throttle.reset(uid)
+    team = await db.join_team(uid, team["id"], _now().isoformat())
+    await state.clear()
+    member = await db.get_member(uid)
+    await message.answer(
+        texts.JOINED.format(team=html.escape(team["name"] or "")), reply_markup=location_keyboard()
+    )
+    await message.answer(f"{await _state_text(team, member)}\n\n{texts.LIVE_TIP}")
+
+
+@player_router.message(F.location)
+async def on_location(message: Message, state: FSMContext) -> None:
+    member, team = await _member_and_team(message.from_user.id)
+    if member is None or team is None:
+        await _ask_password(message, state)
+        return
+    loc = message.location
+    await db.update_member_location(
+        message.from_user.id, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat()
+    )
+    member = await db.get_member(message.from_user.id)
+    await message.answer(await _state_text(team, member))
+
+
+@player_router.edited_message(F.location)
+async def on_location_live(message: Message, bot: Bot) -> None:
+    uid = message.from_user.id
+    member, team = await _member_and_team(uid)
+    if member is None or team is None:
+        return
+    loc = message.location
+    await db.update_member_location(
+        uid, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat()
+    )
+    if team.get("finished_at") is not None:
+        return
+    point = await db.get_current_point(team)
+    if point is None:
+        return
+    member = await db.get_member(uid)
+    text = render_target(member, point)
+
+    loop = asyncio.get_event_loop()
+    stored = _live_msg.get(uid)
+    if stored is None or stored[2] != team["current_position"]:
+        sent = await bot.send_message(message.chat.id, text)
+        _live_msg[uid] = (message.chat.id, sent.message_id, team["current_position"])
+        _live_last_edit[uid] = loop.time()
+    elif loop.time() - _live_last_edit.get(uid, 0.0) >= LIVE_EDIT_MIN_INTERVAL_S:
+        try:
+            await bot.edit_message_text(chat_id=stored[0], message_id=stored[1], text=text)
+        except Exception:
+            pass  # "message is not modified" etc.
+        _live_last_edit[uid] = loop.time()
+
+
+@player_router.message(StateFilter(default_state), F.text, ~F.text.startswith("/"))
+async def on_code(message: Message, bot: Bot, state: FSMContext) -> None:
+    uid = message.from_user.id
+    member, team = await _member_and_team(uid)
+    if member is None or team is None:
+        await message.answer(texts.NOT_IN_TEAM)
+        return
+
+    if team.get("finished_at") is not None:
+        await message.answer(await _final_text(team))
+        return
+    point = await db.get_current_point(team)
+    if point is None:  # route shortened by admin mid-game: treat as finished
+        await message.answer(await _final_text(team))
+        return
+
+    now = _now()
+    result = check_code(member, point, message.text, now)
+    if result == "wrong":
+        await message.answer(texts.CODE_WRONG)
+    elif result in ("stale", "no_location"):
+        await message.answer(texts.CODE_STALE if result == "stale" else texts.CODE_NO_LOCATION)
+    elif result == "far":
+        if member.get("last_lat") is None or point.get("lat") is None:
+            await message.answer(texts.CODE_FAR_UNKNOWN)
+        else:
+            dist = haversine_m(member["last_lat"], member["last_lon"], point["lat"], point["lon"])
+            await message.answer(texts.CODE_FAR.format(dist=fmt_dist(dist)))
+    else:
+        await _accept_code(message, bot, team, member, point, now)
+
+
+async def _accept_code(message: Message, bot: Bot, team: dict, member: dict, point: dict, now: datetime) -> None:
+    uid = message.from_user.id
+    total = len(await db.get_points())
+    adv = await db.advance_team(team["id"], team["current_position"], point["id"], uid, now.isoformat(), total)
+    if adv is None:  # a teammate got there first
+        fresh = await db.get_team(team["id"])
+        await message.answer(await _state_text(fresh, member) if fresh else texts.NOT_IN_TEAM)
+        return
+
+    await _forget_live(team["id"])
+    taken = texts.POINT_TAKEN.format(n=point["position"], who=html.escape(message.from_user.full_name))
+    nxt = await db.get_current_point(adv) if adv.get("finished_at") is None else None
+    if nxt is None:
+        body = await _final_text(adv)
+        await notify_team(bot, team["id"], f"{taken}\n\n{body}")
+        return
+    # each recipient has their own last fix; use the taker's for the shared message
+    taker = await db.get_member(uid)
+    await notify_team(bot, team["id"], f"{taken}\n\n{render_target(taker, nxt)}")
