@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from aiogram import Bot, F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
@@ -294,20 +294,33 @@ async def on_location_live(message: Message, bot: Bot) -> None:
     if point is None:
         return
     member = await db.get_member(uid)
-    text = render_target(member, point)
+    await _push_live(bot, uid, message.chat.id, render_target(member, point), team["current_position"])
 
-    loop = asyncio.get_event_loop()
+
+async def _push_live(bot: Bot, uid: int, chat_id: int, text: str, position: int) -> None:
+    """Edit the player's live status message (throttled), or send a new one if
+    there is none for the current point or the old one can't be edited."""
+    loop = asyncio.get_running_loop()
     stored = _live_msg.get(uid)
-    if stored is None or stored[2] != team["current_position"]:
-        sent = await bot.send_message(message.chat.id, text)
-        _live_msg[uid] = (message.chat.id, sent.message_id, team["current_position"])
+    if stored is None or stored[2] != position:
+        try:
+            sent = await bot.send_message(chat_id, text)
+        except TelegramAPIError as exc:
+            log.warning("live status send to %s failed: %r", uid, exc)
+            return
+        _live_msg[uid] = (chat_id, sent.message_id, position)
         _live_last_edit[uid] = loop.time()
     elif loop.time() - _live_last_edit.get(uid, 0.0) >= LIVE_EDIT_MIN_INTERVAL_S:
+        _live_last_edit[uid] = loop.time()
         try:
             await bot.edit_message_text(chat_id=stored[0], message_id=stored[1], text=text)
-        except Exception:
-            pass  # "message is not modified" etc.
-        _live_last_edit[uid] = loop.time()
+        except TelegramRetryAfter:
+            pass  # flood control: just skip this tick
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                _live_msg.pop(uid, None)  # deleted / too old: next tick sends a fresh message
+        except TelegramAPIError as exc:  # blocked bot etc. — never break the update loop
+            log.warning("live status edit for %s failed: %r", uid, exc)
 
 
 @player_router.message(StateFilter(default_state), F.text, ~F.text.startswith("/"))

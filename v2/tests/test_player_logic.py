@@ -103,3 +103,54 @@ async def test_final_text_escapes_hint(monkeypatch):
     monkeypatch.setattr(db, "get_setting", fake_setting)
     text = await player._final_text({"started_at": None, "finished_at": None})
     assert "&lt;под лавкой&gt; &amp; 5" in text
+
+
+class _FakeBot:
+    def __init__(self, edit_exc=None):
+        self.edit_exc = edit_exc
+        self.sent, self.edited = [], []
+
+    async def send_message(self, chat_id, text):
+        self.sent.append(text)
+
+        class _Sent:
+            message_id = 100 + len(self.sent)
+        return _Sent()
+
+    async def edit_message_text(self, chat_id, message_id, text):
+        self.edited.append((message_id, text))
+        if self.edit_exc:
+            raise self.edit_exc
+
+
+async def test_push_live_recovers_from_deleted_message():
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import EditMessageText
+    from handlers import player
+
+    method = EditMessageText(text="x", chat_id=1, message_id=1)
+    player._live_msg[1] = (1, 50, 1)
+    player._live_last_edit[1] = 0.0
+    bot = _FakeBot(TelegramBadRequest(method, "Bad Request: message to edit not found"))
+    await player._push_live(bot, 1, 1, "t1", 1)
+    assert 1 not in player._live_msg  # forgotten -> next tick sends a new message
+    bot.edit_exc = None
+    await player._push_live(bot, 1, 1, "t2", 1)
+    assert bot.sent == ["t2"] and player._live_msg[1][1] == 101
+
+
+async def test_push_live_not_modified_keeps_message():
+    from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+    from aiogram.methods import EditMessageText
+    from handlers import player
+
+    method = EditMessageText(text="x", chat_id=1, message_id=1)
+    player._live_msg[2] = (2, 60, 1)
+    player._live_last_edit[2] = 0.0
+    bot = _FakeBot(TelegramBadRequest(method, "Bad Request: message is not modified"))
+    await player._push_live(bot, 2, 2, "t", 1)
+    assert player._live_msg[2][1] == 60
+    player._live_last_edit[2] = 0.0
+    bot.edit_exc = TelegramRetryAfter(method, "Flood control", retry_after=30)
+    await player._push_live(bot, 2, 2, "t", 1)  # skipped, no raise
+    assert player._live_msg[2][1] == 60 and bot.sent == []
