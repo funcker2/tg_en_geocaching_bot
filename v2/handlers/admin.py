@@ -8,7 +8,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 import db
-from admin_logic import MAX_TEAMS_AT_ONCE, format_results, parse_coords, parse_count
+from admin_logic import MAX_TEAMS_AT_ONCE, format_breakdown, format_results, parse_coords, parse_count
 from config import ADMINS, TZ
 from handlers.player import render_target
 from keyboards import (
@@ -437,7 +437,7 @@ async def cb_team_delete_ok(callback: CallbackQuery) -> None:
 @admin_router.callback_query(F.data == "admin:results", _admin_event)
 async def cb_results(callback: CallbackQuery) -> None:
     rows = await db.get_results()
-    chunks = format_results(rows, TZ)
+    chunks = format_results(rows, TZ) + format_breakdown(rows, TZ)
     await callback.answer()
     for chunk in chunks:
         await callback.message.answer(chunk)

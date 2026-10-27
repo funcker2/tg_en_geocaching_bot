@@ -1,4 +1,4 @@
-from admin_logic import fmt_local, format_results, parse_coords, parse_count
+from admin_logic import fmt_local, format_breakdown, format_results, parse_coords, parse_count
 
 
 def test_parse_coords_variants():
@@ -58,3 +58,33 @@ def test_format_results_splits_long_output():
 
 def test_format_results_empty():
     assert format_results([], "UTC") == ["Пока нет команд."]
+
+
+def test_format_breakdown_lists_points_with_local_times():
+    slow = {**_row("Б", "2026-08-01T10:00:00+00:00", "2026-08-01T11:30:00+00:00", 2),
+            "taken": [{"label": "Мост", "taken_at": "2026-08-01T10:20:00+00:00"},
+                      {"label": "<Парк>", "taken_at": "2026-08-01T11:30:00+00:00"}]}
+    fast = {**_row("<A>", "2026-08-01T10:00:00+00:00", "2026-08-01T10:45:00+00:00", 1),
+            "taken": [{"label": None, "taken_at": "2026-08-01T10:45:00+00:00"}]}
+    idle = {**_row("В", None, None, 0), "taken": []}
+    out = format_breakdown([slow, idle, fast], "Europe/Sofia")
+    assert len(out) == 1
+    text = out[0]
+    assert "<b>Б</b>: 1) Мост 13:20, 2) &lt;Парк&gt; 14:30" in text
+    assert "<b>&lt;A&gt;</b>: 1) без названия 13:45" in text
+    assert "<b>В</b>: —" in text
+    assert text.index("<b>&lt;A&gt;</b>") < text.index("<b>Б</b>") < text.index("<b>В</b>")  # ranked
+
+
+def test_format_breakdown_splits_long_output():
+    taken = [{"label": f"Точка {i}", "taken_at": "2026-08-01T10:00:00+00:00"} for i in range(40)]
+    rows = [{**_row(f"К{i}", "2026-08-01T10:00:00+00:00", None, 40), "taken": taken} for i in range(30)]
+    out = format_breakdown(rows, "UTC", limit=500)
+    assert len(out) > 1
+    assert all(len(m) <= 500 for m in out)
+    joined = " ".join(out)
+    assert joined.count("40) Точка 39") == 30
+
+
+def test_format_breakdown_empty():
+    assert format_breakdown([], "UTC") == []

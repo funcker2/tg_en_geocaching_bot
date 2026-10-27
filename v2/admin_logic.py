@@ -76,3 +76,35 @@ def format_results(rows: list[dict], tz_name: str, limit: int = MAX_MESSAGE_CHAR
         chunks[-1].append(line)
         size += len(line) + 1
     return ["<pre>" + "\n".join([header, *chunk]) + "</pre>" for chunk in chunks]
+
+
+def _pack(parts: list[str], sep: str, limit: int) -> list[str]:
+    """Greedily join parts with sep into strings no longer than limit."""
+    packed: list[str] = []
+    for part in parts:
+        if packed and len(packed[-1]) + len(sep) + len(part) <= limit:
+            packed[-1] += sep + part
+        else:
+            packed.append(part)
+    return packed
+
+
+def format_breakdown(rows: list[dict], tz_name: str, limit: int = MAX_MESSAGE_CHARS) -> list[str]:
+    """Per-team point times, in ranked order, as HTML messages:
+    '<b>Команда 1</b>: 1) Мост 13:20, 2) Парк 14:30'. Long lines wrap at ', '."""
+    ranked = rank_results(rows)
+    if not ranked:
+        return []
+    lines = ["🕒 <b>Время взятия точек</b>"]
+    for row in ranked:
+        head = f"<b>{html.escape(row['name'] or '—')}</b>: "
+        items = [
+            f"{n}) {html.escape(item['label'] or 'без названия')} {fmt_local(item['taken_at'], tz_name)}"
+            for n, item in enumerate(row.get("taken") or [], start=1)
+        ]
+        if not items:
+            lines.append(head + "—")
+            continue
+        items[0] = head + items[0]
+        lines.extend(_pack(items, ", ", limit))
+    return _pack(lines, "\n", limit)
