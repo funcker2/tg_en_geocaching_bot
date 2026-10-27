@@ -177,8 +177,10 @@
 
 Сервер: `ssh -i /Users/Dzmitry_Skrotski/Documents/FUNCKER/BOTs/keys/id_ed25519 -p 7777 funcker@37.27.12.112`, каталог `/home/funcker/tg_en_geocaching_bot` (единственная копия, git на `385dced`, чистый; контейнер `tg_en_geocaching_bot-geocaching_bot-1`; `data/` принадлежит root — читать можно, писать нет). Порядок важен: после `git pull` корневой `docker-compose.yml` исчезнет.
 
+- [ ] **Step 0 (локально, с разрешения пользователя):** влить `feature/v2` в `main` и `git push origin main` — сервер тянет `main`.
 - [ ] **Step 1:** Бэкап: `cp data/quest.db ~/quest.db.bak-$(date +%Y%m%d-%H%M%S)`; `cp .env ~/geocaching.env.bak`.
-- [ ] **Step 2:** В корне каталога: `docker compose down` (останавливает v1; данные v1 остаются в `data/`).
-- [ ] **Step 3:** `git pull --ff-only`; `cp .env v2/.env` (тот же токен и ADMIN_IDS).
-- [ ] **Step 4:** `cd v2 && docker compose up --build -d`; `docker compose logs --tail 20` → «Bot started», без ошибок.
-- [ ] **Step 5:** Ручная проверка в Telegram (пользователь или админ): `/admin` → тестовая команда → вход по паролю → гео → ввод кода. Откат: `cd v2 && docker compose down && cd ../v1 && docker compose up --build -d` (v1 смотрит в `../data` и `../.env`).
+- [ ] **Step 2:** `git pull --ff-only` (v1 продолжает работать — его контейнер не зависит от файлов в каталоге). `cp .env v2/.env`; проверить, что в `.env` нет кавычек/инлайн-комментариев (env_file строже load_dotenv).
+- [ ] **Step 3:** `cd v2 && docker compose build` — сборка, пока v1 ещё работает. Упала → чиним, v1 не трогали.
+- [ ] **Step 4:** Остановить v1: `docker compose -p tg_en_geocaching_bot down` (корневого compose-файла уже нет — по имени проекта; или `docker stop/rm tg_en_geocaching_bot-geocaching_bot-1`). Убедиться: `docker ps` без него.
+- [ ] **Step 5:** `cd v2 && docker compose up -d`; `docker compose logs --tail 30` → «Bot started», без `TelegramConflictError`.
+- [ ] **Step 6:** Ручная проверка в Telegram: `/admin` → тестовая команда → вход по паролю → трансляция геопозиции → ввод кода; постоять у точки 3+ минуты и ввести код (проверка свежести live). Откат: `cd v2 && docker compose down && cd ../v1 && docker compose up --build -d` (v1 смотрит в `../data` и `../.env`).
