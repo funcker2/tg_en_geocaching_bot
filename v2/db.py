@@ -46,9 +46,14 @@ async def init_db() -> None:
                 last_lat      REAL,
                 last_lon      REAL,
                 last_accuracy REAL,
-                last_loc_at   TEXT
+                last_loc_at   TEXT,
+                live_until    TEXT
             )
         """)
+        cur = await db.execute("PRAGMA table_info(members)")
+        cols = [r[1] for r in await cur.fetchall()]
+        if "live_until" not in cols:  # additive migration for pre-live_until databases
+            await db.execute("ALTER TABLE members ADD COLUMN live_until TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS team_points (
                 team_id  INTEGER NOT NULL,
@@ -266,11 +271,14 @@ async def get_team_member_ids(team_id: int) -> list[int]:
         return [r[0] for r in await cur.fetchall()]
 
 
-async def update_member_location(user_id: int, lat: float, lon: float, accuracy: float | None, loc_at_iso: str) -> None:
+async def update_member_location(
+    user_id: int, lat: float, lon: float, accuracy: float | None, loc_at_iso: str, live_until_iso: str | None = None
+) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "UPDATE members SET last_lat = ?, last_lon = ?, last_accuracy = ?, last_loc_at = ? WHERE user_id = ?",
-            (lat, lon, accuracy, loc_at_iso, user_id),
+            "UPDATE members SET last_lat = ?, last_lon = ?, last_accuracy = ?, last_loc_at = ?, live_until = ? "
+            "WHERE user_id = ?",
+            (lat, lon, accuracy, loc_at_iso, live_until_iso, user_id),
         )
         await db.commit()
 

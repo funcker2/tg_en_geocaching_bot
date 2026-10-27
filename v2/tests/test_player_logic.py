@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from handlers.player import PasswordThrottle, check_code, is_trusted_fix, render_target
+from handlers.player import PasswordThrottle, check_code, is_trusted_location, render_target
 
 NOW = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
 M = 1 / 111_195  # degrees of latitude per metre
@@ -8,14 +8,15 @@ M = 1 / 111_195  # degrees of latitude per metre
 POINT = {"id": 1, "position": 1, "label": "Мост", "lat": 42.0, "lon": 25.0, "code": "Ёлка 7"}
 
 
-def member(offset_m, accuracy=None, age_s=5, has_loc=True):
+def member(offset_m, accuracy=None, age_s=5, has_loc=True, live_until=None):
     if not has_loc:
-        return {"last_lat": None, "last_lon": None, "last_accuracy": None, "last_loc_at": None}
+        return {"last_lat": None, "last_lon": None, "last_accuracy": None, "last_loc_at": None, "live_until": None}
     return {
         "last_lat": 42.0 + offset_m * M,
         "last_lon": 25.0,
         "last_accuracy": accuracy,
         "last_loc_at": (NOW - timedelta(seconds=age_s)).isoformat(),
+        "live_until": live_until,
     }
 
 
@@ -39,16 +40,29 @@ def test_check_code_wrong_near_is_wrong():
     assert check_code(member(5), POINT, "нет", NOW) == "wrong"
 
 
-def test_is_trusted_fix():
-    assert is_trusted_fix(5.0, False, False, False)
-    assert not is_trusted_fix(None, False, False, False)  # map-picked pin
-    assert not is_trusted_fix(5.0, True, False, False)  # forwarded
-    assert not is_trusted_fix(5.0, False, True, False)  # venue
-    assert is_trusted_fix(None, False, False, True)  # live tick
+def test_is_trusted_location():
+    # args: via_bot, forwarded, venue, live_period, edited
+    assert is_trusted_location(False, False, False, 28800, False)  # first live message
+    assert is_trusted_location(False, False, False, None, True)  # edited live tick
+    assert is_trusted_location(False, False, False, 28800, True)
+    assert not is_trusted_location(False, False, False, None, False)  # one-shot (or map pin)
+    assert not is_trusted_location(True, False, False, 28800, False)  # via inline bot
+    assert not is_trusted_location(False, True, False, 28800, False)  # forwarded live
+    assert not is_trusted_location(False, True, False, None, True)  # forwarded, edited
+    assert not is_trusted_location(True, False, False, None, True)  # via bot, edited
+    assert not is_trusted_location(False, False, True, 28800, False)  # venue
 
 
 def test_check_code_stale():
     assert check_code(member(3, age_s=180), POINT, "елка7", NOW) == "stale"
+
+
+def test_check_code_stationary_live_is_fresh():
+    live_on = (NOW + timedelta(hours=1)).isoformat()
+    assert check_code(member(3, age_s=300, live_until=live_on), POINT, "елка7", NOW) == "ok"
+    assert check_code(member(3, age_s=660, live_until=live_on), POINT, "елка7", NOW) == "stale"
+    live_off = (NOW - timedelta(seconds=1)).isoformat()
+    assert check_code(member(3, age_s=180, live_until=live_off), POINT, "елка7", NOW) == "stale"
 
 
 def test_check_code_no_location():

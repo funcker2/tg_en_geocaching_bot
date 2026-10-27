@@ -3,7 +3,7 @@ import html
 import logging
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from aiogram import Bot, F, Router
@@ -21,7 +21,7 @@ from game import (
     effective_radius,
     fmt_dist,
     fmt_duration,
-    is_stale,
+    is_fresh_fix,
     normalize_code,
 )
 from keyboards import location_keyboard
@@ -104,7 +104,7 @@ def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
     judged only on site, so a far-away player cannot probe codes."""
     if member.get("last_lat") is None or member.get("last_lon") is None:
         return "no_location"
-    if is_stale(member.get("last_loc_at"), now):
+    if not is_fresh_fix(member.get("last_loc_at"), member.get("live_until"), now):
         return "stale"
     if point.get("lat") is None or point.get("lon") is None:
         return "far"
@@ -116,15 +116,25 @@ def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
     return "ok"
 
 
-def is_trusted_fix(accuracy: float | None, forwarded: bool, venue: bool, is_live: bool) -> bool:
+def is_trusted_location(via_bot: bool, forwarded: bool, venue: bool, live_period: int | None, edited: bool) -> bool:
     """Whether a location may be stored and used for code checks.
 
-    Live ticks are always trusted. A one-shot location is trusted only if it is
-    not forwarded, not a venue, and carries horizontal_accuracy (a map-picked
-    pin has none, so it could be spoofed from the sofa)."""
-    if is_live:
-        return True
-    return not forwarded and not venue and accuracy is not None
+    Only live locations from the player's own device count: not sent via an
+    inline bot, not forwarded, not a venue, and either the first live message
+    (live_period set) or an edited live tick. One-shot locations — including
+    pins picked by hand on the map — can be faked from the sofa."""
+    if via_bot or forwarded or venue:
+        return False
+    return live_period is not None or edited
+
+
+def _live_until(message: Message) -> str | None:
+    """UTC ISO moment the live sharing of this message ends (None if not live)."""
+    period = message.location.live_period
+    if period is None:
+        return None
+    sent = message.date if message.date.tzinfo else message.date.replace(tzinfo=timezone.utc)
+    return (sent + timedelta(seconds=period)).isoformat()
 
 
 # ── Team state helpers ────────────────────────────────────────────────────────
@@ -239,32 +249,40 @@ async def on_location(message: Message, state: FSMContext) -> None:
     if member is None or team is None:
         await _ask_password(message, state)
         return
+    uid = message.from_user.id
     loc = message.location
-    if not is_trusted_fix(
-        loc.horizontal_accuracy, message.forward_origin is not None, message.venue is not None, False
-    ):
-        if message.forward_origin is not None or message.venue is not None:
-            return  # forwarded / venue locations are ignored outright
-        # map-picked pin: show distance only, never store it for code checks
-        adhoc = {**member, "last_lat": loc.latitude, "last_lon": loc.longitude, "last_accuracy": None}
-        await message.answer(f"{await _state_text(team, adhoc)}\n\n{texts.PIN_NOT_TRUSTED}")
+    if message.via_bot is not None or message.forward_origin is not None or message.venue is not None:
+        return  # someone else's / forwarded / venue locations are ignored outright
+    if not is_trusted_location(False, False, False, loc.live_period, edited=False):
+        # one-shot fix (button or map pin): show distance only, never store it for code checks
+        adhoc = {**member, "last_lat": loc.latitude, "last_lon": loc.longitude, "last_accuracy": loc.horizontal_accuracy}
+        await message.answer(f"{await _state_text(team, adhoc)}\n\n{texts.LIVE_NEEDED}")
         return
+    # first message of a live sharing: store it and make our reply the live status message
     await db.update_member_location(
-        message.from_user.id, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat()
+        uid, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat(), _live_until(message)
     )
-    member = await db.get_member(message.from_user.id)
-    await message.answer(await _state_text(team, member))
+    member = await db.get_member(uid)
+    sent = await message.answer(await _state_text(team, member))
+    if team.get("finished_at") is None:
+        _live_msg[uid] = (message.chat.id, sent.message_id, team["current_position"])
+        _live_last_edit[uid] = asyncio.get_running_loop().time()
 
 
 @player_router.edited_message(F.location)
 async def on_location_live(message: Message, bot: Bot) -> None:
     uid = message.from_user.id
+    loc = message.location
+    if not is_trusted_location(
+        message.via_bot is not None, message.forward_origin is not None, message.venue is not None,
+        loc.live_period, edited=True,
+    ):
+        return
     member, team = await _member_and_team(uid)
     if member is None or team is None:
         return
-    loc = message.location
     await db.update_member_location(
-        uid, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat()
+        uid, loc.latitude, loc.longitude, loc.horizontal_accuracy, _now().isoformat(), _live_until(message)
     )
     if team.get("finished_at") is not None:
         return

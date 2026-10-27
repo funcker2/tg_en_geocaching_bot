@@ -3,7 +3,7 @@ import re
 from datetime import datetime, timezone
 from math import atan2, cos, degrees, radians, sin
 
-from config import ACCURACY_BONUS_CAP_M, ACTIVATION_RADIUS_M, LOCATION_STALE_S
+from config import ACCURACY_BONUS_CAP_M, ACTIVATION_RADIUS_M, LIVE_FRESH_MAX_S, LOCATION_STALE_S
 
 # ── Codes ─────────────────────────────────────────────────────────────────────
 
@@ -23,14 +23,27 @@ def effective_radius(accuracy: float | None) -> float:
     return ACTIVATION_RADIUS_M + min(accuracy, ACCURACY_BONUS_CAP_M)
 
 
+def _parse_utc(iso: str) -> datetime:
+    parsed = datetime.fromisoformat(iso)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def is_stale(loc_at_iso: str | None, now: datetime) -> bool:
     """True if there is no fix or it is older than LOCATION_STALE_S seconds."""
     if loc_at_iso is None:
         return True
-    loc_at = datetime.fromisoformat(loc_at_iso)
-    if loc_at.tzinfo is None:
-        loc_at = loc_at.replace(tzinfo=timezone.utc)
-    return (now - loc_at).total_seconds() > LOCATION_STALE_S
+    return (now - _parse_utc(loc_at_iso)).total_seconds() > LOCATION_STALE_S
+
+
+def is_fresh_fix(loc_at_iso: str | None, live_until_iso: str | None, now: datetime) -> bool:
+    """Fix usable for a code check: younger than LOCATION_STALE_S, or — while
+    live sharing is still running (now < live_until) — younger than
+    LIVE_FRESH_MAX_S, since a parked phone sends no live updates."""
+    if not is_stale(loc_at_iso, now):
+        return True
+    if loc_at_iso is None or live_until_iso is None or now >= _parse_utc(live_until_iso):
+        return False
+    return (now - _parse_utc(loc_at_iso)).total_seconds() <= LIVE_FRESH_MAX_S
 
 
 def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

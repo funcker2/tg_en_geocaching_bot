@@ -155,3 +155,24 @@ async def test_settings_and_members():
     await db.join_team(7, team["id"], "t")
     await db.delete_team(team["id"])
     assert await db.get_member(7) is None and await db.get_team(team["id"]) is None
+
+
+async def test_live_until_stored_and_migrated(tmp_path, monkeypatch):
+    team = (await db.create_teams(1))[0]
+    await db.join_team(7, team["id"], "t")
+    await db.update_member_location(7, 1.5, 2.5, 8.0, "L", live_until_iso="U")
+    assert (await db.get_member(7))["live_until"] == "U"
+    await db.update_member_location(7, 1.5, 2.5, 8.0, "L2")
+    assert (await db.get_member(7))["live_until"] is None
+    # an old v2 database without the column gets it added by init_db
+    old = str(tmp_path / "old.db")
+    async with aiosqlite.connect(old) as conn:
+        await conn.execute("CREATE TABLE members (user_id INTEGER PRIMARY KEY, team_id INTEGER, "
+                           "last_lat REAL, last_lon REAL, last_accuracy REAL, last_loc_at TEXT)")
+        await conn.commit()
+    monkeypatch.setattr(db, "DB_PATH", old)
+    await db.init_db()
+    await db.init_db()  # idempotent
+    async with aiosqlite.connect(old) as conn:
+        cur = await conn.execute("PRAGMA table_info(members)")
+        assert "live_until" in [r[1] for r in await cur.fetchall()]

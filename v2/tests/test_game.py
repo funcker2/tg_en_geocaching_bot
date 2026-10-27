@@ -9,6 +9,7 @@ from game import (
     fmt_dist,
     fmt_duration,
     generate_passwords,
+    is_fresh_fix,
     is_stale,
     normalize_code,
     rank_results,
@@ -91,3 +92,16 @@ def test_fmt_dist():
 
 def test_generate_passwords_charset():
     assert all(re.match(r"^[а-я]+-\d{2}$", p) for p in generate_passwords(2000, random.Random(3)))
+
+
+def test_is_fresh_fix_live_window():
+    now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+    ago = lambda s: (now - timedelta(seconds=s)).isoformat()
+    live_on = (now + timedelta(hours=1)).isoformat()
+    live_off = (now - timedelta(minutes=1)).isoformat()
+    assert is_fresh_fix(ago(300), live_on, now) is True  # live active, 5 min old
+    assert is_fresh_fix(ago(660), live_on, now) is False  # live active, 11 min old
+    assert is_fresh_fix(ago(180), live_off, now) is False  # live expired, 3 min old
+    assert is_fresh_fix(ago(60), None, now) is True  # no live, 1 min old
+    assert is_fresh_fix(ago(180), None, now) is False
+    assert is_fresh_fix(None, live_on, now) is False

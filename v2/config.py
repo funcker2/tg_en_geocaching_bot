@@ -20,5 +20,9 @@ ACCURACY_BONUS_CAP_M: int = 10
 # A cached location older than this is stale and must not be trusted
 LOCATION_STALE_S: int = 120
 
+# While live sharing is still active, a stationary phone sends no updates, so
+# a fix up to this old is still trusted (until live_until passes)
+LIVE_FRESH_MAX_S: int = 600
+
 # Minimum gap between edits of the live-location status message
 LIVE_EDIT_MIN_INTERVAL_S: float = 4.0
