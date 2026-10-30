@@ -40,6 +40,14 @@ def test_check_code_wrong_near_is_wrong():
     assert check_code(member(5), POINT, "нет", NOW) == "wrong"
 
 
+def test_check_code_alternatives():
+    alt = {**POINT, "code": "careem9|carrem9"}
+    assert check_code(member(5), alt, "careem9", NOW) == "ok"
+    assert check_code(member(5), alt, "Carrem 9", NOW) == "ok"
+    assert check_code(member(5), alt, "|", NOW) == "wrong"
+    assert check_code(member(5), alt, "", NOW) == "wrong"
+
+
 def test_is_trusted_location():
     # args: via_bot, forwarded, venue, live_period, edited
     assert is_trusted_location(False, False, False, 28800, False)  # first live message

@@ -112,7 +112,9 @@ def check_code(member: dict, point: dict, code: str, now: datetime) -> str:
     dist = haversine_m(member["last_lat"], member["last_lon"], point["lat"], point["lon"])
     if dist > effective_radius(member.get("last_accuracy")):
         return "far"
-    if not point.get("code") or normalize_code(code) != normalize_code(point["code"]):
+    # Several accepted codes may be stored as "careem9|carrem9" (typos on the sign).
+    accepted = {normalize_code(c) for c in (point.get("code") or "").split("|") if c.strip()}
+    if normalize_code(code) not in accepted:
         return "wrong"
     return "ok"
 
